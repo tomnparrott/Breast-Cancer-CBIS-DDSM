@@ -1,0 +1,35 @@
+# --- DATA / MEDICAL IMAGES (do not commit) ---
+data/
+Data/
+dataset/
+datasets/
+raw/
+processed/
+cbis/
+CBIS-DDSM/
+**/*.dcm
+**/*.dicom
+**/*.tif
+**/*.tiff
+
+# --- TRAINING OUTPUTS / EXPERIMENTS ---
+models/
+checkpoints/
+runs/
+outputs/
+wandb/
+mlruns/
+logs/
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.onnx
+
+# --- PYTHON / ENV ---
+.venv/
+venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store

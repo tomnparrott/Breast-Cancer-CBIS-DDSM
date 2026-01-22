@@ -1,0 +1,30 @@
+c:/Users/tompa/Desktop/Final Project/Breast Cancer-CBIS-DDSM/
+├── Configs/
+│   └── config.yaml
+├── Data/
+│   ├── calc_case_description_test_set.csv
+│   ├── calc_case_description_train_set.csv
+│   ├── CBIS-DDSM-All-doiJNLP-zzWs5zfZ.tcia
+│   ├── downloaded data/
+│   │   └── manifest-ZkhPvrLo5216730872708713142/
+│   │       ├── CBIS-DDSM/
+│   │       │   ├── Calc-Test_P_00038_LEFT_CC/
+│   │        ......
+│   │       └── metadata.csv
+│   ├── mass_case_description_test_set.csv
+│   ├── mass_case_description_train_set.csv
+│   └── Processed/
+├── File Tree.txt
+├── requirements.txt
+├── Scripts/
+│   └── manifestprep.py
+└── SRC/
+    ├── cbis_manifest.py
+    ├── dataset.py
+    ├── eval.py
+    ├── model.py
+    ├── paths.py
+    ├── seed.py
+    ├── split_data.py
+    ├── train.py
+    └── __init__.py
