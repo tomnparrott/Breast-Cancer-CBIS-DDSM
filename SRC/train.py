@@ -8,6 +8,11 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import json
+import datetime
+import platform
+import subprocess
+
 from SRC.seed import set_seed
 from SRC.model import make_resnet18_binary
 from SRC.dataset import CbisDicomDataset
@@ -25,6 +30,42 @@ def get_device() -> str:
     if torch.backends.mps.is_available():
         return "mps"
     return "cpu"
+
+def get_git_hash() -> str:
+    try:
+        return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def make_run_dir(processed_dir: Path, seed: int) -> Path:
+    runs_root = processed_dir / "runs"
+    runs_root.mkdir(parents=True, exist_ok=True)
+    run_id = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S") + f"_seed{seed}"
+    run_dir = runs_root / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # pointer to latest
+    (processed_dir / "latest_run.txt").write_text(run_id, encoding="utf-8")
+    return run_dir
+
+
+def write_run_info(run_dir: Path, cfg: dict) -> None:
+    cfg_path = Path("Configs/config.yaml")
+    cfg_text = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+
+    info = {
+        "timestamp_utc": datetime.datetime.now(datetime.UTC).isoformat(),
+        "git_commit": get_git_hash(),
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "cuda_available": torch.cuda.is_available(),
+        "device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
+        "seed": int(cfg.get("seed", -1)),
+        "config_path": str(cfg_path),
+        "config_snapshot": cfg_text,
+    }
+    (run_dir / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
 
 
 @torch.no_grad()
@@ -66,6 +107,9 @@ def main() -> None:
     processed_dir = Path(cfg["data"]["processed_dir"])
     processed_dir.mkdir(parents=True, exist_ok=True)
 
+    run_dir = make_run_dir(processed_dir, seed)
+    write_run_info(run_dir, cfg)
+
     manifest_path = processed_dir / "manifest.csv"
     if not manifest_path.exists():
         raise FileNotFoundError(
@@ -83,8 +127,8 @@ def main() -> None:
     )
 
     # Save splits for reproducibility
-    splits_path = processed_dir / "splits.csv"
-    splits.to_csv(splits_path, index=False)
+    splits.to_csv(run_dir / "splits.csv", index=False)
+    splits.to_csv(processed_dir / "splits.csv", index=False)
 
     img_size = int(cfg["data"]["img_size"])
     batch_size = int(cfg["train"]["batch_size"])
@@ -165,15 +209,16 @@ def main() -> None:
         if val_metrics["val_loss"] < best_val_loss:
             best_val_loss = val_metrics["val_loss"]
 
-            ckpt_path = processed_dir / "model_best.pt"
+            ckpt_path = run_dir / "model_best.pt"
             torch.save(model.state_dict(), ckpt_path)
-
             print(f"Saved best checkpoint: {ckpt_path}")
 
     # Save final model
-    final_path = processed_dir / "model_final.pt"
+    final_path = run_dir / "model_final.pt"
     torch.save(model.state_dict(), final_path)
     print(f"Saved final model: {final_path}")
+
+    torch.save(model.state_dict(), processed_dir / "model_final.pt")
 
 
 if __name__ == "__main__":

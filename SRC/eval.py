@@ -26,6 +26,14 @@ def get_device() -> str:
         return "mps"
     return "cpu"
 
+def resolve_run_dir(processed_dir: Path) -> Path:
+    latest_ptr = processed_dir / "latest_run.txt"
+    if latest_ptr.exists():
+        run_id = latest_ptr.read_text(encoding="utf-8").strip()
+        candidate = processed_dir / "runs" / run_id
+        if candidate.exists():
+            return candidate
+    return processed_dir
 
 @torch.no_grad()
 def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np.ndarray, np.ndarray]:
@@ -88,8 +96,10 @@ def main() -> None:
     cfg = load_config()
 
     processed_dir = Path(cfg["data"]["processed_dir"])
-    splits_path = processed_dir / "splits.csv"
-    ckpt_path = processed_dir / "model_best.pt"
+    run_dir = resolve_run_dir(processed_dir)
+
+    splits_path = run_dir / "splits.csv"
+    ckpt_path = run_dir / "model_best.pt"
 
     if not splits_path.exists():
         raise FileNotFoundError(
@@ -134,9 +144,9 @@ def main() -> None:
         print(f"{k}: {v}")
 
 
-    out_json = processed_dir / "test_metrics.json"
-    out_json.write_text(json.dumps(metrics, indent=2))
-    print(f"\nSaved metrics: {out_json}\n")
+    (run_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    (processed_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    print(f"\nSaved metrics: {run_dir / 'test_metrics.json'}\n")
 
 
 if __name__ == "__main__":
