@@ -1,14 +1,24 @@
 from pathlib import Path
+from datetime import datetime
+import matplotlib.pyplot as plt
 import json
 import yaml
 import numpy as np
 import pandas as pd
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-
-from sklearn.metrics import roc_auc_score, confusion_matrix, precision_recall_fscore_support
+from sklearn.metrics import (
+    roc_curve,
+    roc_auc_score,
+    confusion_matrix,
+    ConfusionMatrixDisplay,
+    precision_recall_fscore_support,
+    precision_recall_curve,
+    average_precision_score,
+    brier_score_loss,
+)
+from sklearn.calibration import calibration_curve
 
 from SRC.dataset import CbisDicomDataset
 from SRC.model import make_resnet18_binary
@@ -26,6 +36,7 @@ def get_device() -> str:
         return "mps"
     return "cpu"
 
+
 def resolve_run_dir(processed_dir: Path) -> Path:
     latest_ptr = processed_dir / "latest_run.txt"
     if latest_ptr.exists():
@@ -34,6 +45,16 @@ def resolve_run_dir(processed_dir: Path) -> Path:
         if candidate.exists():
             return candidate
     return processed_dir
+
+
+def make_eval_out_dir(run_dir: Path) -> Path:
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    run_name = run_dir.name
+    out_dir = run_dir / "eval_outputs" / date_str / run_name
+    (out_dir / "figures").mkdir(parents=True, exist_ok=True)
+    (out_dir / "metrics").mkdir(parents=True, exist_ok=True)
+    return out_dir
+
 
 @torch.no_grad()
 def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np.ndarray, np.ndarray]:
@@ -47,9 +68,7 @@ def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np
         y = batch["label"].to(device)
 
         logits = model(x)
-
         logits = logits.view(-1)
-
         probs = torch.sigmoid(logits)
 
         y_true.append(y.view(-1).cpu().numpy())
@@ -90,6 +109,79 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
         "tn": int(tn),
         "fn": int(fn),
     }
+
+
+def save_roc_pr_cm(out_dir, y_true, y_prob, threshold=0.5):
+    fig_dir = out_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    # ROC
+    fpr, tpr, _ = roc_curve(y_true, y_prob)
+    auc = roc_auc_score(y_true, y_prob)
+    plt.figure()
+    plt.plot(fpr, tpr)
+    plt.plot([0, 1], [0, 1], linestyle="--")
+    plt.xlabel("False Positive Rate (1 - Specificity)")
+    plt.ylabel("True Positive Rate (Sensitivity)")
+    plt.title(f"ROC (AUC={auc:.4f})")
+    plt.tight_layout()
+    plt.savefig(fig_dir / "roc_curve.png", dpi=200)
+    plt.close()
+
+    # PR
+    precision, recall, _ = precision_recall_curve(y_true, y_prob)
+    ap = average_precision_score(y_true, y_prob)
+    plt.figure()
+    plt.plot(recall, precision)
+    plt.xlabel("Recall (Sensitivity)")
+    plt.ylabel("Precision")
+    plt.title(f"PR (AP={ap:.4f})")
+    plt.tight_layout()
+    plt.savefig(fig_dir / "pr_curve.png", dpi=200)
+    plt.close()
+
+    # Confusion matrix at the ONE report threshold (spec>=0.90 threshold)
+    y_pred = (y_prob >= threshold).astype(int)
+    cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
+    plt.figure()
+    disp.plot(values_format="d")
+    plt.title(f"Confusion Matrix (thr={threshold:.3f})")
+    plt.tight_layout()
+    plt.savefig(fig_dir / "confusion_matrix.png", dpi=200)
+    plt.close()
+
+
+def sensitivity_at_specificity(y_true, y_prob, target_spec=0.90):
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    spec = 1.0 - fpr
+
+    valid = np.where(spec >= target_spec)[0]
+    if len(valid) == 0:
+        best = int(np.argmax(spec))
+        return float(tpr[best]), float(thresholds[best]), float(spec[best])
+
+    best = valid[np.argmax(tpr[valid])]
+    return float(tpr[best]), float(thresholds[best]), float(spec[best])
+
+
+def save_calibration_curve(out_dir, y_true, y_prob, n_bins=10):
+    fig_dir = out_dir / "figures"
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    frac_pos, mean_pred = calibration_curve(
+        y_true, y_prob, n_bins=n_bins, strategy="uniform"
+    )
+
+    plt.figure()
+    plt.plot(mean_pred, frac_pos, marker="o")
+    plt.plot([0, 1], [0, 1], linestyle="--")
+    plt.xlabel("Mean predicted probability")
+    plt.ylabel("Fraction of positives")
+    plt.title(f"Calibration Curve (bins={n_bins})")
+    plt.tight_layout()
+    plt.savefig(fig_dir / "calibration_curve.png", dpi=200)
+    plt.close()
 
 
 def main() -> None:
@@ -137,16 +229,48 @@ def main() -> None:
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
     y_true, y_prob = predict_probs(model, test_loader, device=device)
-    metrics = compute_metrics(y_true, y_prob, threshold=0.5)
+
+    # Choose ONE report operating point: maximise sensitivity subject to specificity >= 0.90
+    sens90, thr90, spec90 = sensitivity_at_specificity(y_true, y_prob, target_spec=0.90)
+
+    # All thresholded metrics + confusion matrix use thr90 for consistency
+    metrics = compute_metrics(y_true, y_prob, threshold=thr90)
+
+    # Add threshold-free / probability-quality metrics
+    metrics["avg_precision"] = float(average_precision_score(y_true, y_prob))
+    metrics["brier_score"] = float(brier_score_loss(y_true, y_prob))
+
+    # Explicitly store the spec>=0.90 operating point details (rubric requirement)
+    metrics["sensitivity_at_spec_0.90"] = sens90
+    metrics["threshold_at_spec_0.90"] = thr90
+    metrics["specificity_achieved_at_spec_0.90"] = spec90
 
     print("\n=== TEST METRICS ===")
     for k, v in metrics.items():
         print(f"{k}: {v}")
 
+    out_dir = make_eval_out_dir(run_dir)
 
-    (run_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    (processed_dir / "test_metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    print(f"\nSaved metrics: {run_dir / 'test_metrics.json'}\n")
+    # --- save plots (ROC/PR threshold-free; CM uses thr90) ---
+    save_roc_pr_cm(out_dir, y_true, y_prob, threshold=thr90)
+    save_calibration_curve(out_dir, y_true, y_prob, n_bins=10)
+
+    # --- save metrics + preds ---
+    (out_dir / "metrics" / "test_metrics.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
+    pd.DataFrame([metrics]).to_csv(out_dir / "metrics" / "test_metrics.csv", index=False)
+
+    np.savez_compressed(
+        out_dir / "metrics" / "test_preds.npz",
+        y_true=y_true,
+        y_prob=y_prob,
+    )
+
+    print(f"\nSaved metrics: {out_dir / 'metrics' / 'test_metrics.json'}\n")
+    print(f"Saved figures: {out_dir / 'figures'}")
+    print(f"Saved metrics CSV: {out_dir / 'metrics' / 'test_metrics.csv'}")
+    print(f"Saved preds: {out_dir / 'metrics' / 'test_preds.npz'}")
 
 
 if __name__ == "__main__":
