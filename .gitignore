@@ -33,3 +33,18 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+
+
+# LaTeX build artefacts
+report/**/*.aux
+report/**/*.log
+report/**/*.out
+report/**/*.toc
+report/**/*.fls
+report/**/*.fdb_latexmk
+report/**/*.synctex.gz
+report/**/*.bbl
+report/**/*.blg
+report/**/*.bcf
+report/**/*.run.xml
+report/**/*.pdf
