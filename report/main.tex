@@ -5,6 +5,30 @@
 \usepackage{float}
 \usepackage{booktabs}
 \usepackage{hyperref}
+% --- Code snippets ---
+\usepackage{xcolor}
+\usepackage{listings}
+
+\lstdefinestyle{code}{
+  basicstyle=\ttfamily\small,
+  numbers=left,
+  numberstyle=\tiny,
+  stepnumber=1,
+  numbersep=8pt,
+  frame=single,
+  framerule=0.4pt,
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=2,
+  showstringspaces=false,
+  captionpos=b,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  stringstyle=\color{teal},
+}
+
+% Default style
+\lstset{style=code}
 
 \title{Deep Learning for Breast Cancer Detection in Mammography}
 \author{Tom Parrott}
@@ -18,6 +42,8 @@
 \input{sections/literature_review}
 
 \input{sections/design}
+
+\input{sections/feature_prototype}
 
 \section{Baseline Results}
 
