@@ -27,6 +27,10 @@
   stringstyle=\color{teal},
 }
 
+% --- References ---
+\usepackage[backend=biber,style=authoryear]{biblatex}
+\addbibresource{refs.bib}
+
 % Default style
 \lstset{style=code}
 
@@ -45,62 +49,9 @@
 
 \input{sections/feature_prototype}
 
-\section{Baseline Results}
-
-This section reports the baseline performance of the trained classifier on the held-out test set.
-Following a clinically conservative operating point, the decision threshold was selected to achieve
-approximately 90\% specificity (threshold $\approx 0.620$). Table~\ref{tab:baseline_metrics} summarises
-the baseline metrics, and Figures~\ref{fig:cm_baseline}--\ref{fig:cal_baseline} show the main evaluation plots.
-
-\begin{table}[H]
-\centering
-\begin{tabular}{lr}
-\toprule
-Metric & Value \\
-\midrule
-Decision threshold (spec $\approx$ 0.90) & 0.6205 \\
-ROC--AUC & 0.7454 \\
-Average Precision (AP) & 0.5996 \\
-Precision & 0.6413 \\
-Recall / Sensitivity & 0.3189 \\
-Specificity & 0.9065 \\
-F1-score & 0.4260 \\
-\midrule
-TP / FP / TN / FN & 59 / 33 / 320 / 126 \\
-\bottomrule
-\end{tabular}
-\caption{Baseline test performance at the specificity-constrained operating point.}
-\label{tab:baseline_metrics}
-\end{table}
-
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.75\linewidth]{figures/baseline/confusion_matrix_thr_spec0.90.png}
-  \caption{Baseline confusion matrix at the specificity-constrained threshold (thr $\approx 0.620$).}
-  \label{fig:cm_baseline}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.75\linewidth]{figures/baseline/roc_curve.png}
-  \caption{ROC curve for the baseline model (AUC $\approx 0.745$).}
-  \label{fig:roc_baseline}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.75\linewidth]{figures/baseline/pr_curve.png}
-  \caption{Precision--Recall curve for the baseline model (AP $\approx 0.600$).}
-  \label{fig:pr_baseline}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  \includegraphics[width=0.75\linewidth]{figures/baseline/calibration_curve.png}
-  \caption{Calibration curve for the baseline model (10 bins).}
-  \label{fig:cal_baseline}
-\end{figure}
+\input{sections/basline_results}
+\nocite{*}
+\input{sections/bibliography}
 
 
 \end{document}
