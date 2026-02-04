@@ -1,0 +1,15 @@
+\begin{table}[ht]
+\centering
+\caption{Effect of \texttt{pos\_weight} at an operating point targeting specificity $\approx 0.90$ (seed=42).}
+\label{tab:pos_weight_sweep}
+\begin{tabular}{rcccccccc}
+\hline
+pos\_weight & ROC AUC & AP & Spec & Sens & Prec & F1 & TP/FP/TN/FN & Thr@Spec$\approx$0.90 \\
+\hline
+1 & 0.7294 & 0.5758 & 0.9008 & 0.3189 & 0.6277 & 0.423 & 59/35/318/126 & 0.7979 \\
+2 & 0.7373 & 0.6085 & 0.9008 & 0.3405 & 0.6429 & 0.445 & 63/35/318/122 & 0.8982 \\
+3 & 0.7454 & 0.5996 & 0.9065 & 0.3189 & 0.6413 & 0.426 & 59/33/320/126 & 0.6205 \\
+5 & 0.7551 & 0.5925 & 0.9093 & 0.3135 & 0.6444 & 0.422 & 58/32/321/127 & 0.9276 \\
+\hline
+\end{tabular}
+\end{table}

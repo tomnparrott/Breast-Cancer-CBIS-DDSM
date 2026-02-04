@@ -1,7 +1,9 @@
-\documentclass[11pt]{article}
+\documentclass[12pt]{report}
 
+% ---------- Packages (safe defaults) ----------
 \usepackage[a4paper,margin=1in]{geometry}
 \usepackage{graphicx}
+\usepackage{setspace}
 \usepackage{float}
 \usepackage{booktabs}
 \usepackage{hyperref}
@@ -39,7 +41,46 @@
 \date{\today}
 
 \begin{document}
-\maketitle
+
+% ---------- Title page ----------
+\begin{titlepage}
+    \centering
+    \vspace*{3cm}
+
+    {\LARGE \textbf{Deep Learning for Breast Cancer Detection in Mammography}\par}
+    \vspace{1.5cm}
+
+    {\Large Tom Parrott\par}
+    \vspace{0.5cm}
+
+    {\large CM3070 Final Project\par}
+    \vspace{0.5cm}
+
+    {\large University of London\par}
+    \vspace{1.5cm}
+
+    {\large February 2026\par}
+
+    \vfill
+\end{titlepage}
+
+% ---------- Abstract (placeholder) ----------
+\begin{abstract}
+\noindent
+\textbf{Placeholder:} This project investigates whether deep learning can improve breast cancer detection from mammography images. The final version of this abstract will summarise the dataset used, model approach (baseline vs experiments), evaluation design (patient-level splitting and clinically relevant metrics), key results, and main conclusions.
+\end{abstract}
+
+\clearpage
+
+% ---------- Table of contents + lists ----------
+\tableofcontents
+\clearpage
+
+\listoffigures
+\clearpage
+
+\listoftables
+\clearpage
 
 \input{sections/introduction}
 
@@ -50,6 +91,9 @@
 \input{sections/feature_prototype}
 
 \input{sections/basline_results}
+
+\input{sections/methodology.tex}
+
 \nocite{*}
 \input{sections/bibliography}
 
