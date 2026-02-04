@@ -31,6 +31,12 @@ def get_device() -> str:
         return "mps"
     return "cpu"
 
+def make_bce_loss(cfg: dict, device: str) -> nn.Module:
+    pos_w = float(cfg.get("train", {}).get("pos_weight", 1.0))
+    pos_weight_t = torch.tensor([pos_w], device=device)
+    return nn.BCEWithLogitsLoss(pos_weight=pos_weight_t)
+
+
 def get_git_hash() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
@@ -69,10 +75,9 @@ def write_run_info(run_dir: Path, cfg: dict) -> None:
 
 
 @torch.no_grad()
-def evaluate(model: nn.Module, loader: DataLoader, device: str) -> dict:
+def evaluate(model: nn.Module, loader: DataLoader, device: str, cfg: dict) -> dict:
     model.eval()
-
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = make_bce_loss(cfg, device)
 
     total_loss = 0.0
     correct = 0
@@ -137,7 +142,7 @@ def main() -> None:
     train_df = splits[splits["split"] == "train"].copy()
     val_df = splits[splits["split"] == "val"].copy()
 
-    train_ds = CbisDicomDataset(train_df, img_size=img_size, augment=True)
+    train_ds = CbisDicomDataset(train_df, img_size=img_size, augment=False)
     val_ds = CbisDicomDataset(val_df, img_size=img_size, augment=False)
 
     train_loader = DataLoader(
@@ -159,7 +164,14 @@ def main() -> None:
     device = get_device()
     model = make_resnet18_binary(pretrained=True).to(device)
 
-    criterion = nn.BCEWithLogitsLoss()
+    ####### Experiment 1: optionally freeze backbone (feature extraction) #######
+    if cfg.get("train", {}).get("freeze_backbone", False):
+        for name, param in model.named_parameters():
+            if not name.startswith("fc"):
+                param.requires_grad = False
+    ##############################################################################
+
+    criterion = make_bce_loss(cfg, device)
 
     optimiser = torch.optim.AdamW(
         model.parameters(),
@@ -195,7 +207,7 @@ def main() -> None:
             pbar.set_postfix(train_loss=(running_loss / max(seen, 1)))
 
         # Validation at end of epoch
-        val_metrics = evaluate(model, val_loader, device=device)
+        val_metrics = evaluate(model, val_loader, device=device, cfg=cfg)
         train_loss = running_loss / max(seen, 1)
 
         print(
