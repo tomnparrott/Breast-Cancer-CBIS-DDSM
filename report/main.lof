@@ -1,0 +1,7 @@
+\contentsline {figure}{\numberline {1}{\ignorespaces Terminal output from the preprocessing/manifest step.}}{14}{figure.0.1}%
+\contentsline {figure}{\numberline {2}{\ignorespaces Terminal output training over 10 epochs.}}{18}{figure.0.2}%
+\contentsline {figure}{\numberline {3}{\ignorespaces Terminal output from the evaluation step.}}{19}{figure.0.3}%
+\contentsline {figure}{\numberline {4}{\ignorespaces Baseline confusion matrix at the specificity-constrained threshold (thr $\approx 0.620$).}}{20}{figure.0.4}%
+\contentsline {figure}{\numberline {5}{\ignorespaces ROC curve for the baseline model (AUC $\approx 0.745$).}}{21}{figure.0.5}%
+\contentsline {figure}{\numberline {6}{\ignorespaces Precision--Recall curve for the baseline model (AP $\approx 0.600$).}}{22}{figure.0.6}%
+\contentsline {figure}{\numberline {7}{\ignorespaces Calibration curve for the baseline model (10 bins).}}{22}{figure.0.7}%

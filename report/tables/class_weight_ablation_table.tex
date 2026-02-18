@@ -1,0 +1,16 @@
+\begin{table}[h]
+\centering
+\caption{Class weight ablation with fixed specificity constraint ($\geq 0.90$).}
+\label{tab:class_weight_ablation}
+\begin{tabular}{lccc}
+\hline
+\textbf{Metric} & \textbf{pos\_weight = 2} & \textbf{pos\_weight = 3} & \textbf{pos\_weight = 4} \\
+\hline
+ROC AUC & 0.752 & \textbf{0.759} & 0.716 \\
+Average Precision (AP) & 0.618 & \textbf{0.644} & 0.565 \\
+Sensitivity @ Spec $\geq$ 0.90 & 0.373 & \textbf{0.389} & 0.319 \\
+Specificity Achieved & 0.901 & 0.915 & 0.904 \\
+Brier Score & 0.256 & 0.265 & 0.338 \\
+\hline
+\end{tabular}
+\end{table}

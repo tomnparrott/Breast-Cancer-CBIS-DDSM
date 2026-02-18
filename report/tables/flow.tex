@@ -1,0 +1,32 @@
+\begin{tikzpicture}[
+    node distance=1.6cm,
+    every node/.style={draw, rectangle, rounded corners, align=center, minimum width=3.5cm}
+]
+
+\node (data) {CBIS-DDSM\\Raw DICOM Images};
+\node (prep) [below of=data] {Preprocessing\\(resize, normalise)};
+\node (split) [below of=prep] {Train / Val / Test Split};
+\node (cnn) [below of=split] {ResNet18\\Feature Extractor};
+\node (head) [below of=cnn] {Classification Head};
+\node (prob) [below of=head] {Predicted Probability $p(y=1)$};
+
+\node (decision) [below of=prob, minimum width=6cm] {
+Decision Logic (Human-in-the-Loop)\\
+$p \geq T_{high}$: High risk\\
+$T_{low} \leq p < T_{high}$: Refer clinician\\
+$p < T_{low}$: Low risk
+};
+
+\node (human) [below of=decision] {Clinician Review};
+\node (outcome) [below of=human] {Final Decision};
+
+\draw[->] (data) -- (prep);
+\draw[->] (prep) -- (split);
+\draw[->] (split) -- (cnn);
+\draw[->] (cnn) -- (head);
+\draw[->] (head) -- (prob);
+\draw[->] (prob) -- (decision);
+\draw[->] (decision) -- (human);
+\draw[->] (human) -- (outcome);
+
+\end{tikzpicture}

@@ -1,0 +1,11 @@
+\section{Methodology}
+
+\input{tables/pos_weight_sweep}
+
+We select \texttt{pos\_weight}=2 for subsequent runs because it yields the highest sensitivity at specificity $\approx 0.90$.
+
+\input{tables/augmentation_ablation}
+
+Disabling augmentation improved sensitivity at fixed specificity ($\approx 0.90$), so augmentation was disabled for subsequent experiments.
+
+\input{tables/flow.tex}

@@ -1,0 +1,14 @@
+\begin{table}[ht]
+\centering
+\caption{Augmentation ablation at fixed operating point (target specificity $\approx 0.90$), with \texttt{pos\_weight}=2 (seed=42).}
+\label{tab:augmentation_ablation}
+\begin{tabular}{lcccccccc}
+\hline
+Setting & ROC AUC & AP & Spec & Sens@Spec$\approx$0.90 & Thr@Spec$\approx$0.90 & TP/FP/TN/FN \\
+\hline
+Augmentation ON  & 0.7294 & 0.5758 & 0.9008 & 0.3189 & 0.7979 & 59/35/318/126 \\
+Augmentation OFF & 0.7524 & 0.6181 & 0.9008 & 0.3730 & 0.9012 & 69/35/318/116 \\
+\hline
+\end{tabular}
+\end{table}
+

@@ -6,7 +6,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from torch.utils.data import WeightedRandomSampler
 from tqdm import tqdm
+
+from sklearn.metrics import roc_auc_score
 
 import json
 import datetime
@@ -32,9 +35,7 @@ def get_device() -> str:
     return "cpu"
 
 def make_bce_loss(cfg: dict, device: str) -> nn.Module:
-    pos_w = float(cfg.get("train", {}).get("pos_weight", 1.0))
-    pos_weight_t = torch.tensor([pos_w], device=device)
-    return nn.BCEWithLogitsLoss(pos_weight=pos_weight_t)
+    return nn.BCEWithLogitsLoss()
 
 
 def get_git_hash() -> str:
@@ -83,9 +84,12 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, cfg: dict) -> di
     correct = 0
     total = 0
 
+    all_targets = []
+    all_probs = []
+
     for batch in loader:
-        x = batch["image"].to(device)
-        y = batch["label"].to(device)
+        x = batch["image"].to(device=device, dtype=torch.float32)
+        y = batch["label"].to(device=device, dtype=torch.float32)
 
         logits = model(x)
         loss = criterion(logits, y)
@@ -97,9 +101,21 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, cfg: dict) -> di
         correct += int((preds == y).sum().item())
         total += x.size(0)
 
+        all_targets.extend(y.detach().cpu().numpy().reshape(-1))
+        all_probs.extend(probs.detach().cpu().numpy().reshape(-1))
+
+    all_targets = np.array(all_targets)
+    all_probs = np.array(all_probs)
+
+    try:
+        auc = roc_auc_score(all_targets, all_probs)
+    except ValueError:
+        auc = 0.5
+
     return {
         "val_loss": total_loss / max(total, 1),
         "val_acc": correct / max(total, 1),
+        "auc": float(auc),
     }
 
 
@@ -142,17 +158,31 @@ def main() -> None:
     train_df = splits[splits["split"] == "train"].copy()
     val_df = splits[splits["split"] == "val"].copy()
 
-    train_ds = CbisDicomDataset(train_df, img_size=img_size, augment=False)
+    # Weighted sampling to balance classes per batch
+    labels = train_df["label"].astype(int).to_numpy()
+    class_counts = np.bincount(labels)
+    class_counts = np.maximum(class_counts, 1)  # safety
+    class_weights = 1.0 / class_counts
+    sample_weights = class_weights[labels]
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(sample_weights, dtype=torch.double),
+        num_samples=len(sample_weights),
+        replacement=True,
+    )
+
+    augment = bool(cfg.get("train", {}).get("augment", False))
+
+    train_ds = CbisDicomDataset(train_df, img_size=img_size, augment=augment)
     val_ds = CbisDicomDataset(val_df, img_size=img_size, augment=False)
 
     train_loader = DataLoader(
         train_ds,
         batch_size=batch_size,
-        shuffle=True,
+        sampler=sampler,
+        shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
     )
-
     val_loader = DataLoader(
         val_ds,
         batch_size=batch_size,
@@ -173,15 +203,22 @@ def main() -> None:
 
     criterion = make_bce_loss(cfg, device)
 
+    base_lr = float(cfg["train"]["lr"])
     optimiser = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(cfg["train"]["lr"]),
+        [
+            {"params": model.fc.parameters(), "lr": base_lr},
+            {"params": [p for n, p in model.named_parameters() if not n.startswith("fc")], "lr": base_lr * 0.1},
+        ],
         weight_decay=float(cfg["train"]["weight_decay"]),
+    )
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimiser, mode="min", factor=0.5, patience=2
     )
 
     # Training loop
     epochs = int(cfg["train"]["epochs"])
-    best_val_loss = float("inf")
+    best_val_auc = 0.0
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -190,8 +227,8 @@ def main() -> None:
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch}/{epochs}", leave=False)
         for batch in pbar:
-            x = batch["image"].to(device)
-            y = batch["label"].to(device)
+            x = batch["image"].to(device=device, dtype=torch.float32)
+            y = batch["label"].to(device=device, dtype=torch.float32)
 
             optimiser.zero_grad(set_to_none=True)
 
@@ -208,22 +245,23 @@ def main() -> None:
 
         # Validation at end of epoch
         val_metrics = evaluate(model, val_loader, device=device, cfg=cfg)
+        scheduler.step(val_metrics["val_loss"])
         train_loss = running_loss / max(seen, 1)
 
         print(
             f"[Epoch {epoch}] "
             f"train_loss={train_loss:.4f} "
             f"val_loss={val_metrics['val_loss']:.4f} "
-            f"val_acc={val_metrics['val_acc']:.4f}"
+            f"val_acc={val_metrics['val_acc']:.4f} "
+            f"val_auc={val_metrics['auc']:.4f}"
         )
 
-        # Save best model checkpoint
-        if val_metrics["val_loss"] < best_val_loss:
-            best_val_loss = val_metrics["val_loss"]
+        if val_metrics["auc"] > best_val_auc:
+            best_val_auc = val_metrics["auc"]
 
             ckpt_path = run_dir / "model_best.pt"
             torch.save(model.state_dict(), ckpt_path)
-            print(f"Saved best checkpoint: {ckpt_path}")
+            print(f"Saved best checkpoint (AUC={best_val_auc:.4f}): {ckpt_path}")
 
     # Save final model
     final_path = run_dir / "model_final.pt"

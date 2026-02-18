@@ -1,0 +1,20 @@
+\begin{table}[h]
+\centering
+\caption{Effect of class weighting on test performance (no augmentation)}
+\label{tab:pos_weight_comparison}
+\begin{tabular}{lcc}
+\hline
+\textbf{Metric} & \textbf{pos\_weight = 2} & \textbf{pos\_weight = 3} \\
+\hline
+ROC AUC & 0.752 & 0.759 \\
+Average Precision (PR AUC) & 0.618 & 0.644 \\
+Sensitivity @ Spec $\geq$ 0.90 & 0.373 & 0.389 \\
+Specificity Achieved & 0.901 & 0.915 \\
+True Positives (TP) & 69 & 72 \\
+False Negatives (FN) & 116 & 113 \\
+False Positives (FP) & 35 & 30 \\
+True Negatives (TN) & 318 & 323 \\
+Brier Score & 0.256 & 0.265 \\
+\hline
+\end{tabular}
+\end{table}

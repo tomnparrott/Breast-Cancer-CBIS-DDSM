@@ -64,8 +64,8 @@ def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np
     y_prob = []
 
     for batch in loader:
-        x = batch["image"].to(device)
-        y = batch["label"].to(device)
+        x = batch["image"].to(device=device, dtype=torch.float32)
+        y = batch["label"].to(device=device, dtype=torch.float32)
 
         logits = model(x)
         logits = logits.view(-1)
