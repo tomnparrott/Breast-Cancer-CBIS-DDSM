@@ -4,15 +4,16 @@ data:
   raw_dir: "Data/downloaded data/manifest-zkhPvrLo5216730872708713142"
   processed_dir: "Data/Processed"
   source: "tcia"
-  img_size: 224
+  img_size: 512
 
 train:
-  batch_size: 16
+  batch_size: 8
   num_workers: 4
-  epochs: 10
+  epochs: 25
   lr: 0.0001
   weight_decay: 0.0001
-  pos_weight: 1.0
+  pos_weight: auto
+  use_weighted_sampler: false
   freeze_backbone: false
   augment: true
 

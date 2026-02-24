@@ -8,3 +8,5 @@ pyyaml
 tqdm
 matplotlib
 pydicom
+pytest
+pytest-cov

@@ -57,7 +57,16 @@ def make_eval_out_dir(run_dir: Path) -> Path:
 
 
 @torch.no_grad()
-def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np.ndarray, np.ndarray]:
+def predict_probs(
+    model: nn.Module,
+    loader: DataLoader,
+    device: str,
+    tta: bool = False,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Returns y_true, y_prob.
+    Optional simple TTA: average prediction with horizontal flip.
+    """
     model.eval()
 
     y_true = []
@@ -67,9 +76,14 @@ def predict_probs(model: nn.Module, loader: DataLoader, device: str) -> tuple[np
         x = batch["image"].to(device=device, dtype=torch.float32)
         y = batch["label"].to(device=device, dtype=torch.float32)
 
-        logits = model(x)
-        logits = logits.view(-1)
+        logits = model(x).view(-1)
         probs = torch.sigmoid(logits)
+
+        if tta:
+            x_flip = torch.flip(x, dims=[3])  # flip width
+            logits_f = model(x_flip).view(-1)
+            probs_f = torch.sigmoid(logits_f)
+            probs = 0.5 * (probs + probs_f)
 
         y_true.append(y.view(-1).cpu().numpy())
         y_prob.append(probs.view(-1).cpu().numpy())
@@ -111,19 +125,19 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
     }
 
 
-def save_roc_pr_cm(out_dir, y_true, y_prob, threshold=0.5):
+def save_roc_pr_cm(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> None:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     # ROC
     fpr, tpr, _ = roc_curve(y_true, y_prob)
-    auc = roc_auc_score(y_true, y_prob)
+    auc = roc_auc_score(y_true, y_prob) if len(np.unique(y_true)) > 1 else float("nan")
     plt.figure()
     plt.plot(fpr, tpr)
     plt.plot([0, 1], [0, 1], linestyle="--")
     plt.xlabel("False Positive Rate (1 - Specificity)")
     plt.ylabel("True Positive Rate (Sensitivity)")
-    plt.title(f"ROC (AUC={auc:.4f})")
+    plt.title(f"ROC (AUC={auc:.4f})" if np.isfinite(auc) else "ROC (AUC=nan)")
     plt.tight_layout()
     plt.savefig(fig_dir / "roc_curve.png", dpi=200)
     plt.close()
@@ -140,7 +154,7 @@ def save_roc_pr_cm(out_dir, y_true, y_prob, threshold=0.5):
     plt.savefig(fig_dir / "pr_curve.png", dpi=200)
     plt.close()
 
-    # Confusion matrix at the ONE report threshold (spec>=0.90 threshold)
+    # Confusion matrix at provided threshold
     y_pred = (y_prob >= threshold).astype(int)
     cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
     disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=[0, 1])
@@ -152,7 +166,7 @@ def save_roc_pr_cm(out_dir, y_true, y_prob, threshold=0.5):
     plt.close()
 
 
-def sensitivity_at_specificity(y_true, y_prob, target_spec=0.90):
+def sensitivity_at_specificity(y_true: np.ndarray, y_prob: np.ndarray, target_spec: float = 0.90) -> tuple[float, float, float]:
     fpr, tpr, thresholds = roc_curve(y_true, y_prob)
     spec = 1.0 - fpr
 
@@ -165,7 +179,20 @@ def sensitivity_at_specificity(y_true, y_prob, target_spec=0.90):
     return float(tpr[best]), float(thresholds[best]), float(spec[best])
 
 
-def save_calibration_curve(out_dir, y_true, y_prob, n_bins=10):
+def specificity_at_sensitivity(y_true: np.ndarray, y_prob: np.ndarray, target_sens: float = 0.90) -> tuple[float, float, float]:
+    fpr, tpr, thresholds = roc_curve(y_true, y_prob)
+    spec = 1.0 - fpr
+
+    valid = np.where(tpr >= target_sens)[0]
+    if len(valid) == 0:
+        best = int(np.argmax(tpr))
+        return float(spec[best]), float(thresholds[best]), float(tpr[best])
+
+    best = valid[np.argmax(spec[valid])]
+    return float(spec[best]), float(thresholds[best]), float(tpr[best])
+
+
+def save_calibration_curve(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> None:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
 
@@ -182,6 +209,76 @@ def save_calibration_curve(out_dir, y_true, y_prob, n_bins=10):
     plt.tight_layout()
     plt.savefig(fig_dir / "calibration_curve.png", dpi=200)
     plt.close()
+
+
+def _ensure_col(df: pd.DataFrame, col: str, default: str = "Unknown") -> None:
+    if col not in df.columns:
+        df[col] = default
+    df[col] = df[col].fillna(default).astype(str)
+
+
+def _add_density_group(df: pd.DataFrame) -> None:
+    """
+    Creates a binned density group: 1-2, 3-4, Unknown
+    (More stable than per-density when groups are small.)
+    """
+    if "breast_density" not in df.columns:
+        df["density_group"] = "Unknown"
+        return
+
+    def to_group(v: str) -> str:
+        v = str(v).strip()
+        if v in {"1", "2"}:
+            return "1-2"
+        if v in {"3", "4"}:
+            return "3-4"
+        return "Unknown"
+
+    df["density_group"] = df["breast_density"].map(to_group).astype(str)
+
+
+def compute_subgroup_metrics(
+    df_pred: pd.DataFrame,
+    group_col: str,
+    threshold: float,
+) -> list[dict]:
+    """
+    Computes subgroup metrics at a FIXED threshold (the global operating threshold).
+    Also computes subgroup ROC-AUC (if subgroup contains both classes).
+    """
+    out: list[dict] = []
+    if group_col not in df_pred.columns:
+        return out
+
+    for group_value, g in df_pred.groupby(group_col):
+        y_true = g["y_true"].to_numpy().astype(int)
+        y_prob = g["y_prob"].to_numpy().astype(float)
+
+        m = compute_metrics(y_true, y_prob, threshold=threshold)
+
+        # Add counts
+        pos = int((y_true == 1).sum())
+        neg = int((y_true == 0).sum())
+
+        out.append(
+            {
+                "group_by": group_col,
+                "group": str(group_value),
+                "n": int(len(g)),
+                "pos": pos,
+                "neg": neg,
+                "threshold": float(threshold),
+                "auc": float(m["auc"]) if np.isfinite(m["auc"]) else float("nan"),
+                "sensitivity": float(m["recall_sensitivity"]),
+                "specificity": float(m["specificity"]),
+                "tp": int(m["tp"]),
+                "fp": int(m["fp"]),
+                "tn": int(m["tn"]),
+                "fn": int(m["fn"]),
+            }
+        )
+
+    return out
 
 
 def main() -> None:
@@ -228,22 +325,46 @@ def main() -> None:
     model = make_resnet18_binary(pretrained=False).to(device)
     model.load_state_dict(torch.load(ckpt_path, map_location=device))
 
-    y_true, y_prob = predict_probs(model, test_loader, device=device)
+    # Eval options (safe defaults if not present in config)
+    eval_cfg = cfg.get("eval", {}) if isinstance(cfg.get("eval", {}), dict) else {}
+    tta = bool(eval_cfg.get("tta", False))
+    target_spec = float(eval_cfg.get("target_specificity", 0.90))
 
-    # Choose ONE report operating point: maximise sensitivity subject to specificity >= 0.90
-    sens90, thr90, spec90 = sensitivity_at_specificity(y_true, y_prob, target_spec=0.90)
+    y_true, y_prob = predict_probs(model, test_loader, device=device, tta=tta)
 
-    # All thresholded metrics + confusion matrix use thr90 for consistency
-    metrics = compute_metrics(y_true, y_prob, threshold=thr90)
+    sens_at_spec, thr_at_spec, spec_achieved = sensitivity_at_specificity(
+        y_true, y_prob, target_spec=target_spec
+    )
 
-    # Add threshold-free / probability-quality metrics
+    metrics = compute_metrics(y_true, y_prob, threshold=thr_at_spec)
+
+    op_points = {}
+
+    for s in [0.80, 0.85, 0.90, 0.95]:
+        sens, thr, spec = sensitivity_at_specificity(y_true, y_prob, target_spec=s)
+        op_points[f"sens_at_spec_{s:.2f}"] = {
+            "sensitivity": sens,
+            "threshold": thr,
+            "specificity": spec,
+        }
+
+    for r in [0.80, 0.85, 0.90]:
+        spec, thr, sens = specificity_at_sensitivity(y_true, y_prob, target_sens=r)
+        op_points[f"spec_at_sens_{r:.2f}"] = {
+            "specificity": spec,
+            "threshold": thr,
+            "sensitivity": sens,
+        }
+
+    metrics["operating_points"] = op_points
+
     metrics["avg_precision"] = float(average_precision_score(y_true, y_prob))
     metrics["brier_score"] = float(brier_score_loss(y_true, y_prob))
 
-    # Explicitly store the spec>=0.90 operating point details (rubric requirement)
-    metrics["sensitivity_at_spec_0.90"] = sens90
-    metrics["threshold_at_spec_0.90"] = thr90
-    metrics["specificity_achieved_at_spec_0.90"] = spec90
+    metrics[f"sensitivity_at_spec_{target_spec:.2f}"] = sens_at_spec
+    metrics[f"threshold_at_spec_{target_spec:.2f}"] = thr_at_spec
+    metrics[f"specificity_achieved_at_spec_{target_spec:.2f}"] = spec_achieved
+    metrics["tta"] = bool(tta)
 
     print("\n=== TEST METRICS ===")
     for k, v in metrics.items():
@@ -251,11 +372,11 @@ def main() -> None:
 
     out_dir = make_eval_out_dir(run_dir)
 
-    # --- save plots (ROC/PR threshold-free; CM uses thr90) ---
-    save_roc_pr_cm(out_dir, y_true, y_prob, threshold=thr90)
+    # Figures
+    save_roc_pr_cm(out_dir, y_true, y_prob, threshold=thr_at_spec)
     save_calibration_curve(out_dir, y_true, y_prob, n_bins=10)
 
-    # --- save metrics + preds ---
+    # Save core metrics
     (out_dir / "metrics" / "test_metrics.json").write_text(
         json.dumps(metrics, indent=2), encoding="utf-8"
     )
@@ -267,9 +388,43 @@ def main() -> None:
         y_prob=y_prob,
     )
 
-    print(f"\nSaved metrics: {out_dir / 'metrics' / 'test_metrics.json'}\n")
+    # ----------------------------
+    # Subgroup evaluation
+    # ----------------------------
+    # Ensure metadata columns exist (new manifest/splits should include them)
+    _ensure_col(test_df, "breast_density", default="Unknown")
+    _ensure_col(test_df, "abnormality_type", default="unknown")
+    _add_density_group(test_df)
+
+    # Sanity: ordering must match loader ordering (shuffle=False)
+    if len(test_df) != len(y_true):
+        raise RuntimeError(
+            f"Length mismatch: test_df={len(test_df)} vs preds={len(y_true)}. "
+            "This should not happen with shuffle=False."
+        )
+
+    df_pred = test_df.reset_index(drop=True).copy()
+    df_pred["y_true"] = y_true.astype(int)
+    df_pred["y_prob"] = y_prob.astype(float)
+    df_pred["y_pred"] = (df_pred["y_prob"] >= thr_at_spec).astype(int)
+
+    subgroup_rows: list[dict] = []
+    subgroup_rows += compute_subgroup_metrics(df_pred, "breast_density", threshold=thr_at_spec)
+    subgroup_rows += compute_subgroup_metrics(df_pred, "density_group", threshold=thr_at_spec)
+    subgroup_rows += compute_subgroup_metrics(df_pred, "abnormality_type", threshold=thr_at_spec)
+
+    subgroup_path_json = out_dir / "metrics" / "subgroup_metrics.json"
+    subgroup_path_csv = out_dir / "metrics" / "subgroup_metrics.csv"
+
+    subgroup_path_json.write_text(json.dumps(subgroup_rows, indent=2), encoding="utf-8")
+    pd.DataFrame(subgroup_rows).to_csv(subgroup_path_csv, index=False)
+
+    # Also save per-case table (handy for Streamlit selectors later)
+    df_pred.to_csv(out_dir / "metrics" / "test_predictions_with_meta.csv", index=False)
+
+    print(f"\nSaved metrics: {out_dir / 'metrics' / 'test_metrics.json'}")
+    print(f"Saved subgroup metrics: {subgroup_path_json}")
     print(f"Saved figures: {out_dir / 'figures'}")
-    print(f"Saved metrics CSV: {out_dir / 'metrics' / 'test_metrics.csv'}")
     print(f"Saved preds: {out_dir / 'metrics' / 'test_preds.npz'}")
 
 

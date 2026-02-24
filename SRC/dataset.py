@@ -1,23 +1,53 @@
 from pathlib import Path
-import pandas as pd
+from typing import Tuple, Optional
+
 import numpy as np
+import pandas as pd
 
 import torch
 from torch.utils.data import Dataset
 from torchvision import transforms
+from torchvision.transforms import functional as TF
 
 import pydicom
 
 
-def load_first_dicom_as_array(series_dir: Path) -> np.ndarray:
+def _choose_best_dicom(series_dir: Path) -> Path:
+    """
+    Some CBIS-DDSM folders can contain multiple DICOMs (e.g., different derived images).
+    This picks a 'best' candidate by favouring:
+      - largest pixel area (H*W)
+      - higher standard deviation (non-binary / non-empty looking images)
+    """
     dcm_files = sorted(series_dir.rglob("*.dcm"))
     if not dcm_files:
         raise FileNotFoundError(f"No DICOM files found in: {series_dir}")
 
-    ds = pydicom.dcmread(str(dcm_files[0]))
+    best_path: Optional[Path] = None
+    best_score: float = -1.0
 
-    img = ds.pixel_array.astype(np.float32)
+    for p in dcm_files:
+        try:
+            ds = pydicom.dcmread(str(p))
+            arr = ds.pixel_array.astype(np.float32)
+        except Exception:
+            continue
 
+        area = float(arr.size)
+        std = float(arr.std())
+        score = area + (std * 1000.0)
+
+        if score > best_score:
+            best_score = score
+            best_path = p
+
+    if best_path is None:
+        raise FileNotFoundError(f"No readable DICOMs found in: {series_dir}")
+
+    return best_path
+
+
+def _apply_rescale_window_and_scale(ds, img: np.ndarray) -> np.ndarray:
     # Apply rescale slope/intercept if present
     slope = float(getattr(ds, "RescaleSlope", 1.0))
     intercept = float(getattr(ds, "RescaleIntercept", 0.0))
@@ -26,8 +56,8 @@ def load_first_dicom_as_array(series_dir: Path) -> np.ndarray:
     # Apply windowing if present (handles MultiValue)
     wc = getattr(ds, "WindowCenter", None)
     ww = getattr(ds, "WindowWidth", None)
+
     if wc is not None and ww is not None:
-        # window center/width can be pydicom.multival.MultiValue
         if isinstance(wc, (list, tuple)):
             wc = float(wc[0])
         else:
@@ -54,15 +84,95 @@ def load_first_dicom_as_array(series_dir: Path) -> np.ndarray:
     else:
         img = np.zeros_like(img, dtype=np.float32)
 
+    return img.astype(np.float32)
+
+
+def _crop_to_foreground(img: np.ndarray, thr: float = 0.02, margin_frac: float = 0.03) -> np.ndarray:
+    """
+    Crops to non-background region to reduce black padding dominance.
+    Assumes img is already in [0, 1].
+
+    - thr: background threshold
+    - margin_frac: extra border margin around detected foreground
+    """
+    if img.ndim != 2:
+        raise ValueError("Expected a 2D (H, W) image array")
+
+    mask = img > thr
+    if not mask.any():
+        return img
+
+    ys, xs = np.where(mask)
+    y0, y1 = int(ys.min()), int(ys.max())
+    x0, x1 = int(xs.min()), int(xs.max())
+
+    h, w = img.shape
+    margin = int(max(h, w) * margin_frac)
+
+    y0 = max(0, y0 - margin)
+    y1 = min(h - 1, y1 + margin)
+    x0 = max(0, x0 - margin)
+    x1 = min(w - 1, x1 + margin)
+
+    # Avoid degenerate crops
+    if (y1 - y0) < 10 or (x1 - x0) < 10:
+        return img
+
+    return img[y0 : y1 + 1, x0 : x1 + 1]
+
+
+def load_dicom_as_array(series_dir: Path, crop_foreground: bool = True) -> np.ndarray:
+    dcm_path = _choose_best_dicom(series_dir)
+    ds = pydicom.dcmread(str(dcm_path))
+
+    img = ds.pixel_array.astype(np.float32)
+    img = _apply_rescale_window_and_scale(ds, img)
+
+    if crop_foreground:
+        img = _crop_to_foreground(img, thr=0.02, margin_frac=0.03)
+
     return img
 
 
+class PadToSquare:
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        # x is (C, H, W)
+        _, h, w = x.shape
+        if h == w:
+            return x
+
+        # pad (left, top, right, bottom)
+        if w > h:
+            diff = w - h
+            top = diff // 2
+            bottom = diff - top
+            padding = (0, top, 0, bottom)
+        else:
+            diff = h - w
+            left = diff // 2
+            right = diff - left
+            padding = (left, 0, right, 0)
+
+        return TF.pad(x, padding, fill=0)
+
+
 class CbisDicomDataset(Dataset):
-    def __init__(self, df: pd.DataFrame, img_size: int, augment: bool) -> None:
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        img_size: int,
+        augment: bool,
+        num_channels: int = 3,
+        crop_foreground: bool = True,
+    ) -> None:
         self.df = df.reset_index(drop=True)
         self.augment = augment
+        self.num_channels = int(num_channels)
+        self.crop_foreground = bool(crop_foreground)
 
+        self.pad_to_square = PadToSquare()
         self.resize = transforms.Resize((img_size, img_size))
+
         self.aug = transforms.Compose(
             [
                 transforms.RandomHorizontalFlip(p=0.5),
@@ -72,11 +182,18 @@ class CbisDicomDataset(Dataset):
                 transforms.RandomAdjustSharpness(sharpness_factor=1.5, p=0.3),
             ]
         )
-        self.to_tensor = transforms.ToTensor()  
-        self.norm = transforms.Normalize(
-            mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225],
-        )
+
+        self.to_tensor = transforms.ToTensor()
+
+        # Default stays ImageNet norm for 3ch because you're using ImageNet-pretrained ResNet18
+        if self.num_channels == 3:
+            self.norm = transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        else:
+            # sensible default for single-channel if you ever switch
+            self.norm = transforms.Normalize(mean=[0.5], std=[0.25])
 
     def __len__(self) -> int:
         return len(self.df)
@@ -88,12 +205,15 @@ class CbisDicomDataset(Dataset):
         label_int = int(row["label"])
         series_dir = Path(row["image_dir"])
 
-        img = load_first_dicom_as_array(series_dir)
+        img = load_dicom_as_array(series_dir, crop_foreground=self.crop_foreground)
 
-        x = self.to_tensor(img)  
+        x = self.to_tensor(img)          # (1, H, W), float32 already in [0,1]
+        x = self.pad_to_square(x)
         x = self.resize(x)
-        x = x.repeat(3, 1, 1)
-        
+
+        if self.num_channels == 3:
+            x = x.repeat(3, 1, 1)
+
         if self.augment:
             x = self.aug(x)
 
