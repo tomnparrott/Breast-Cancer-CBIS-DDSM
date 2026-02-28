@@ -40,7 +40,11 @@ def safe_read_json(p: Path) -> dict:
         return {}
 
 
-def find_latest_eval_metrics_dir(run_dir: Path):
+def find_latest_eval_metrics_dir(run_dir: Path) -> Path | None:
+    """
+    Expected structure:
+      run_dir/eval_outputs/<YYYY-MM-DD>/<run_name>/metrics
+    """
     root = run_dir / "eval_outputs"
     if not root.exists():
         return None
@@ -83,6 +87,15 @@ def add_density_group(df: pd.DataFrame) -> None:
         df["density_group"] = "Unknown"
         return
     df["density_group"] = df["breast_density"].map(to_group).astype(str)
+
+
+def add_outcome_column(df: pd.DataFrame) -> None:
+    if "outcome" in df.columns:
+        return
+    df["outcome"] = "TN"
+    df.loc[(df["y_true"] == 0) & (df["y_pred"] == 1), "outcome"] = "FP"
+    df.loc[(df["y_true"] == 1) & (df["y_pred"] == 0), "outcome"] = "FN"
+    df.loc[(df["y_true"] == 1) & (df["y_pred"] == 1), "outcome"] = "TP"
 
 
 def enrich_case_index(case_index: pd.DataFrame, manifest: pd.DataFrame | None) -> pd.DataFrame:
@@ -218,9 +231,6 @@ def cleanup_zip_session() -> None:
 
 
 def decision_panel(prob: float, pred: int, thr: float, mode_text: str, y_true: int | None) -> None:
-    """
-    Big, layman-friendly “what is the system recommending?” panel.
-    """
     rec = triage_label(pred)
     if pred == 1:
         st.warning(f"### Recommendation: {rec}")
@@ -254,9 +264,132 @@ def why_panel(viz_mode: str, show_gradcam: bool) -> None:
     if not show_gradcam or viz_mode == "Input only":
         st.caption("Grad-CAM is not currently displayed (switch Explainability view to Heatmap/Overlay and toggle Grad-CAM on).")
     else:
-        st.caption(
-            "Important: Grad-CAM shows **influence**, not a confirmed tumour location. It can highlight broader tissue patterns or artefacts."
-        )
+        st.caption("Grad-CAM shows **influence**, not a confirmed tumour location. It can highlight broader tissue patterns or artefacts.")
+
+
+# -----------------------------
+# Audit / policy merge helpers
+# -----------------------------
+def _norm_path_series(s: pd.Series) -> pd.Series:
+    return (
+        s.astype(str)
+        .str.replace("\\\\", "/", regex=True)
+        .str.replace("\\", "/", regex=False)
+        .str.strip()
+        .str.rstrip("/")
+    )
+
+
+def merge_audit_fields(case_index: pd.DataFrame | None, preds_meta: pd.DataFrame | None) -> pd.DataFrame | None:
+    """
+    Merge audit + density-policy fields from test_predictions_with_meta.csv into case_index.
+    """
+    if case_index is None or case_index.empty:
+        return case_index
+    if preds_meta is None or preds_meta.empty:
+        return case_index
+    if "image_dir" not in case_index.columns or "image_dir" not in preds_meta.columns:
+        return case_index
+
+    audit_cols = [c for c in preds_meta.columns if c.startswith("audit_")]
+
+    preferred = [
+        # audit
+        "audit_flag_any",
+        "audit_cam_outside_ratio",
+        "audit_cam_edge_ratio",
+        "audit_cam_ring_ratio",
+        "audit_p_masked",
+        "audit_delta_masked",
+        # policy (Patch C)
+        "threshold_density_policy",
+        "y_pred_density_policy",
+    ]
+
+    cols = [c for c in preferred if c in preds_meta.columns]
+    cols = list(dict.fromkeys(cols + [c for c in audit_cols if c not in cols]))
+
+    left = case_index.copy()
+    right = preds_meta.copy()
+
+    # prevent _x/_y duplication
+    drop_cols = [c for c in left.columns if c.startswith("audit_")]
+    for c in ["threshold_density_policy", "y_pred_density_policy"]:
+        if c in left.columns:
+            drop_cols.append(c)
+    left.drop(columns=drop_cols, errors="ignore", inplace=True)
+
+    left["_img_norm"] = _norm_path_series(left["image_dir"])
+    right["_img_norm"] = _norm_path_series(right["image_dir"])
+    right = right.drop_duplicates(subset=["_img_norm"], keep="first")
+
+    m = right[["_img_norm"] + cols].copy()
+    out = left.merge(m, on="_img_norm", how="left").drop(columns=["_img_norm"])
+
+    # ensure main fields exist even if missing in preds_meta
+    for c in preferred:
+        if c not in out.columns:
+            out[c] = np.nan
+
+    return out
+
+
+def apply_shortcut_filters(
+    df: pd.DataFrame,
+    only_flagged: bool,
+    min_outside: float | None,
+    use_delta_filter: bool,
+    max_delta: float | None,
+) -> pd.DataFrame:
+    out = df
+
+    if only_flagged and "audit_flag_any" in out.columns:
+        out = out[out["audit_flag_any"].fillna(0).astype(int) == 1]
+
+    if (
+        min_outside is not None
+        and float(min_outside) > 0.0
+        and "audit_cam_outside_ratio" in out.columns
+    ):
+        out = out[out["audit_cam_outside_ratio"].fillna(0.0).astype(float) >= float(min_outside)]
+
+    if use_delta_filter and max_delta is not None and "audit_delta_masked" in out.columns:
+        out = out[out["audit_delta_masked"].astype(float) <= float(max_delta)]
+
+    return out
+
+
+def sort_triage(df: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
+    if sort_mode == "Risk score (p)":
+        return df.sort_values("y_prob", ascending=False)
+
+    if sort_mode == "Largest drop when masked":
+        if "audit_delta_masked" in df.columns:
+            return df.sort_values("audit_delta_masked", ascending=True)
+        return df.sort_values("y_prob", ascending=False)
+
+    if sort_mode == "Highest CAM outside breast":
+        if "audit_cam_outside_ratio" in df.columns:
+            return df.sort_values("audit_cam_outside_ratio", ascending=False)
+        return df.sort_values("y_prob", ascending=False)
+
+    return df.sort_values("y_prob", ascending=False)
+
+
+def reset_case_review_filters() -> None:
+    for k in [
+        "cr_outcome",
+        "cr_density",
+        "cr_abn",
+        "cr_audit_only",
+        "cr_min_outside",
+        "cr_use_delta",
+        "cr_max_delta",
+        "cr_sort_mode",
+        "cr_case_select",
+    ]:
+        st.session_state.pop(k, None)
+    st.rerun()
 
 
 # -----------------------------
@@ -316,18 +449,36 @@ def get_model_cached(ckpt_path_str: str, device: str):
 model = get_model_cached(str(ckpt_path), device)
 img_size = int(cfg["data"]["img_size"])
 
+
 # -----------------------------
 # Load artefacts
 # -----------------------------
 def load_case_index(run_dir: Path) -> pd.DataFrame | None:
-    p1 = run_dir / "case_index.csv"
-    if p1.exists():
-        return pd.read_csv(p1)
     mdir = find_latest_eval_metrics_dir(run_dir)
     if mdir is not None:
         p2 = mdir / "case_index.csv"
         if p2.exists():
             return pd.read_csv(p2)
+
+    p1 = run_dir / "case_index.csv"
+    if p1.exists():
+        return pd.read_csv(p1)
+
+    return None
+
+
+def load_test_predictions_with_meta(run_dir: Path) -> pd.DataFrame | None:
+    mdir = find_latest_eval_metrics_dir(run_dir)
+    if mdir is None:
+        return None
+    p = mdir / "test_predictions_with_meta.csv"
+    if p.exists():
+        df = pd.read_csv(p)
+        if "density_group" not in df.columns:
+            add_density_group(df)
+        if "y_true" in df.columns and "y_pred" in df.columns and "outcome" not in df.columns:
+            add_outcome_column(df)
+        return df
     return None
 
 
@@ -355,8 +506,14 @@ def load_run_info(run_dir: Path) -> dict:
 
 
 manifest_df = load_manifest(proc_dir)
+
 case_index_raw = load_case_index(run_dir)
 case_index = enrich_case_index(case_index_raw, manifest_df) if case_index_raw is not None else None
+
+preds_meta = load_test_predictions_with_meta(run_dir)
+if preds_meta is not None and not preds_meta.empty:
+    case_index = merge_audit_fields(case_index, preds_meta)
+
 subgroup_file = load_subgroup_metrics(run_dir)
 test_metrics = load_test_metrics(run_dir)
 run_info = load_run_info(run_dir)
@@ -378,6 +535,16 @@ with st.sidebar:
     else:
         st.write(f"Eval threshold: **{eval_threshold:.3f}**")
 
+    use_density_policy = st.toggle(
+        "Use density-aware policy (val-calibrated)",
+        value=False,
+        key="sb_use_density_policy",
+        help="Uses per-density thresholds learned on VAL to target the same specificity per density group.",
+    )
+    if use_density_policy:
+        st.caption("When enabled, policy overrides the threshold for TEST-set cases shown in the dashboard.")
+
+
 # -----------------------------
 # Tabs
 # -----------------------------
@@ -390,9 +557,6 @@ tab0, tab1, tab2, tab3, tab4 = st.tabs(
 # -----------------------------
 with tab0:
     st.subheader("Plain English Summary")
-    st.write(
-        "This page is designed for non-technical readers. It summarises what the system does and how well it performed on the test set."
-    )
 
     if case_index is None or case_index.empty or not test_metrics:
         st.warning("Evaluation artefacts not found for this run. Run: `py -m SRC.eval` and `py -m SRC.case_index`.")
@@ -407,41 +571,31 @@ with tab0:
         prec = tp / (tp + fp + 1e-8)
 
         auc = float(test_metrics.get("auc", np.nan))
-        ap = float(test_metrics.get("avg_precision", np.nan))
         thr = float(test_metrics.get("threshold", eval_threshold if eval_threshold is not None else 0.5))
 
         st.info(
-            f"**At the chosen operating point (threshold ≈ {thr:.3f})** the system is tuned to reduce false alarms "
+            f"At the chosen operating point (threshold ≈ {thr:.3f}) the system is tuned to reduce false alarms "
             "and will flag fewer cases for review."
         )
 
         c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Test cases", f"{len(case_index)}")
-        c2.metric("Sensitivity (cancers caught)", f"{sens:.3f}")
-        c3.metric("Specificity (benign not flagged)", f"{spec:.3f}")
-        c4.metric("Precision (flagged that are cancer)", f"{prec:.3f}")
-        c5.metric("AUC (ranking quality)", f"{auc:.3f}")
+        c2.metric("Sensitivity", f"{sens:.3f}")
+        c3.metric("Specificity", f"{spec:.3f}")
+        c4.metric("Precision", f"{prec:.3f}")
+        c5.metric("AUC", f"{auc:.3f}")
 
-        st.write("#### What this means in practice")
         st.write(
-            f"- Out of **{tp + fn} malignant** test cases, the system **flagged {tp}** and **missed {fn}** at this strict setting.\n"
-            f"- Out of **{tn + fp} benign** test cases, the system **correctly did not flag {tn}**, but **flagged {fp}** as false alarms.\n"
-            "- If you lower the threshold, the system will catch more cancers but will also produce more false alarms.\n"
+            f"- Malignant: **{tp + fn}** (flagged **{tp}**, missed **{fn}**)\n"
+            f"- Benign: **{tn + fp}** (not flagged **{tn}**, false alarms **{fp}**)\n"
         )
-
-        with st.expander("Important limitations (plain English)", expanded=False):
-            st.write(
-                "- This model was trained and tested on a historical dataset (CBIS-DDSM). Performance may change on new hospitals/scanners.\n"
-                "- The heatmap is an explainability tool; it does not prove the tumour location.\n"
-                "- In a real setting this would only be used to support a radiologist, not replace clinical judgment."
-            )
 
 # -----------------------------
 # Tab 1: Case Review
 # -----------------------------
 with tab1:
     st.subheader("Case Review (per image)")
-    st.caption("This page is designed to explain each decision clearly and show supporting evidence (image + heatmap).")
+    st.caption("Select a case to see the input image, Grad-CAM, and shortcut-risk indicators (when available).")
 
     colA, colB = st.columns([1, 1])
 
@@ -453,15 +607,18 @@ with tab1:
             key="cr_source",
         )
 
-        selected_series_dir = None
-        meta = {}
+        selected_series_dir: Path | None = None
+        meta: dict = {}
         y_true: int | None = None
-        per_case_eval_thr = None
+        per_case_eval_thr: float | None = None
 
         if source == "From case_index (test set)":
             if case_index is None or case_index.empty:
                 st.warning("case_index.csv not found for this run. Run: `py -m SRC.case_index`")
             else:
+                if st.button("Reset Case Review filters", key="cr_reset_btn"):
+                    reset_case_review_filters()
+
                 f1, f2, f3 = st.columns(3)
                 with f1:
                     outcome_filter = st.multiselect(
@@ -469,7 +626,6 @@ with tab1:
                         options=sorted(case_index["outcome"].unique().tolist()),
                         default=sorted(case_index["outcome"].unique().tolist()),
                         key="cr_outcome",
-                        help="TP=True positive, FP=False positive, TN=True negative, FN=False negative.",
                     )
                 with f2:
                     density_filter = st.multiselect(
@@ -492,53 +648,115 @@ with tab1:
                     & case_index["abnormality_type"].isin(abn_filter)
                 ].copy()
 
+                audit_available = ("audit_flag_any" in filtered.columns) and filtered["audit_flag_any"].notna().any()
+
+                if audit_available:
+                    st.divider()
+                    st.write("#### Shortcut-risk filters (audit)")
+                    a1, a2, a3 = st.columns(3)
+                    with a1:
+                        only_flagged = st.checkbox("Flagged only", value=False, key="cr_audit_only")
+                    with a2:
+                        min_outside = st.slider(
+                            "Min CAM outside-breast",
+                            0.0,
+                            1.0,
+                            0.0,
+                            0.01,
+                            key="cr_min_outside",
+                        )
+                    with a3:
+                        use_delta = st.checkbox("Use mask ablation filter", value=False, key="cr_use_delta")
+
+                    max_delta = None
+                    if use_delta:
+                        max_delta = st.slider(
+                            "Max Δ prob (masked - original)",
+                            -1.0,
+                            1.0,
+                            -0.05,
+                            0.01,
+                            key="cr_max_delta",
+                        )
+
+                    filtered = apply_shortcut_filters(
+                        filtered,
+                        only_flagged=only_flagged,
+                        min_outside=min_outside,
+                        use_delta_filter=use_delta,
+                        max_delta=max_delta,
+                    )
+
                 st.write(f"Filtered cases: **{len(filtered)}**")
+                if filtered.empty:
+                    st.warning("No cases match the current filters. Relax filters to continue.")
+                else:
+                    sort_options = ["Risk score (p)"]
+                    if "audit_delta_masked" in filtered.columns and filtered["audit_delta_masked"].notna().any():
+                        sort_options.append("Largest drop when masked")
+                    if "audit_cam_outside_ratio" in filtered.columns and filtered["audit_cam_outside_ratio"].notna().any():
+                        sort_options.append("Highest CAM outside breast")
 
-                max_show = min(500, len(filtered))
-                filtered_view = filtered.head(max_show).copy()
-                filtered_view["display"] = (
-                    filtered_view["risk_rank"].astype(str)
-                    + " | "
-                    + filtered_view["outcome"].astype(str)
-                    + " | p="
-                    + filtered_view["y_prob"].round(4).astype(str)
-                    + " | dens="
-                    + filtered_view["density_group"].astype(str)
-                    + " | "
-                    + filtered_view["abnormality_type"].astype(str)
-                    + " | "
-                    + filtered_view["view"].astype(str)
-                )
+                    sort_mode = st.selectbox("Sort cases by", sort_options, index=0, key="cr_sort_mode")
+                    filtered = sort_triage(filtered, sort_mode)
 
-                idx = st.selectbox(
-                    "Select case",
-                    options=filtered_view.index.tolist(),
-                    format_func=lambda i: filtered_view.loc[i, "display"],
-                    key="cr_case_select",
-                )
-                row = filtered_view.loc[idx]
-                selected_series_dir = Path(row["image_dir"])
-                meta = row.to_dict()
+                    filtered_view = filtered.head(min(500, len(filtered))).copy()
 
-                if "y_true" in meta and not pd.isna(meta["y_true"]):
+                    extra = ""
+                    if "audit_flag_any" in filtered_view.columns and filtered_view["audit_flag_any"].notna().any():
+                        outside = filtered_view.get("audit_cam_outside_ratio", pd.Series([np.nan] * len(filtered_view)))
+                        delta = filtered_view.get("audit_delta_masked", pd.Series([np.nan] * len(filtered_view)))
+                        extra = (
+                            " | audit="
+                            + filtered_view["audit_flag_any"].fillna(0).astype(int).astype(str)
+                            + " | out="
+                            + outside.fillna(np.nan).astype(float).round(2).astype(str)
+                            + " | d="
+                            + delta.fillna(np.nan).astype(float).round(2).astype(str)
+                        )
+
+                    filtered_view["display"] = (
+                        filtered_view["risk_rank"].astype(str)
+                        + " | "
+                        + filtered_view["outcome"].astype(str)
+                        + " | p="
+                        + filtered_view["y_prob"].round(4).astype(str)
+                        + extra
+                        + " | dens="
+                        + filtered_view["density_group"].astype(str)
+                        + " | "
+                        + filtered_view["abnormality_type"].astype(str)
+                        + " | "
+                        + filtered_view["view"].astype(str)
+                    )
+
+                    idx = st.selectbox(
+                        "Select case",
+                        options=filtered_view.index.tolist(),
+                        format_func=lambda i: filtered_view.loc[i, "display"],
+                        key="cr_case_select",
+                    )
+
+                    row = filtered_view.loc[idx]
+                    selected_series_dir = Path(row["image_dir"])
+                    meta = row.to_dict()
+
                     try:
-                        y_true = int(meta["y_true"])
+                        y_true = int(meta.get("y_true")) if "y_true" in meta and not pd.isna(meta.get("y_true")) else None
                     except Exception:
                         y_true = None
 
-                if "threshold_used" in meta and not pd.isna(meta["threshold_used"]):
                     try:
-                        per_case_eval_thr = float(meta["threshold_used"])
+                        per_case_eval_thr = (
+                            float(meta.get("threshold_used"))
+                            if "threshold_used" in meta and not pd.isna(meta.get("threshold_used"))
+                            else None
+                        )
                     except Exception:
                         per_case_eval_thr = None
 
-                # Make image_dir easy to copy
-                st.write("**Image folder path (for ZIP tests):**")
-                st.code(str(meta.get("image_dir", "")), language="text")
-
-                # Keep raw metadata out of the way (but accessible)
-                with st.expander("Technical metadata (raw)", expanded=False):
-                    st.json(meta)
+                    with st.expander("Technical metadata (raw)", expanded=False):
+                        st.json(meta)
 
         elif source == "Manual folder path":
             p = st.text_input("Folder path containing DICOMs for ONE case", value="", key="cr_manual_path")
@@ -598,72 +816,66 @@ with tab1:
                 prob = predict_proba(model, prep.x, device=device, tta=tta)
                 pred = int(prob >= float(thr))
 
-                # Big, layman-friendly block FIRST
+                # ---- Density policy override (TEST-set only) ----
+                if use_density_policy and meta and source == "From case_index (test set)":
+                    thr_pol = meta.get("threshold_density_policy", None)
+                    pred_pol = meta.get("y_pred_density_policy", None)
+
+                    if pd.notna(thr_pol):
+                        thr = float(thr_pol)
+                        mode_text = "Density-aware policy"
+                        pred = int(prob >= float(thr))
+
+                    if pd.notna(pred_pol):
+                        pred = int(pred_pol)
+
                 decision_panel(prob=prob, pred=pred, thr=float(thr), mode_text=mode_text, y_true=y_true)
                 why_panel(viz_mode=viz_mode, show_gradcam=show_gradcam)
 
-                # Visualisation
+                if meta and (meta.get("audit_flag_any") is not None):
+                    st.write("#### Shortcut-risk indicators (audit)")
+                    m1, m2, m3 = st.columns(3)
+                    try:
+                        m1.metric("Audit flagged", f"{int(float(meta.get('audit_flag_any', 0)))}")
+                    except Exception:
+                        m1.metric("Audit flagged", "n/a")
+
+                    try:
+                        m2.metric("CAM outside-breast", f"{float(meta.get('audit_cam_outside_ratio')):.3f}")
+                    except Exception:
+                        m2.metric("CAM outside-breast", "n/a")
+
+                    try:
+                        m3.metric("Δ prob (masked - orig)", f"{float(meta.get('audit_delta_masked')):.3f}")
+                    except Exception:
+                        m3.metric("Δ prob (masked - orig)", "n/a")
+
                 st.write("#### Image evidence")
                 if viz_mode == "Input only":
-                    st.image(prep.img_display, caption="Preprocessed mammogram (model input)", clamp=True, width="stretch")
+                    st.image(prep.img_display, caption="Preprocessed mammogram (model input)", use_container_width=True)
                 else:
                     if not show_gradcam:
-                        st.image(prep.img_display, caption="Preprocessed mammogram (model input)", clamp=True, width="stretch")
+                        st.image(prep.img_display, caption="Preprocessed mammogram (model input)", use_container_width=True)
                         st.warning("Grad-CAM is off, so heatmap views are unavailable.")
                     else:
                         cam = gradcam_resnet18(model, prep.x, device=device)
                         if viz_mode == "Heatmap only":
                             st.pyplot(heatmap_fig(cam))
-                            st.caption("Grad-CAM heatmap: regions that most influenced the risk score.")
                         else:
                             st.pyplot(overlay_fig(prep.img_display, cam, alpha=cam_alpha))
-                            st.caption("Overlay: input + Grad-CAM (influential regions).")
-
-                # Optional: light summary of the case if available
-                if meta:
-                    st.write("#### Case summary")
-                    summary = {
-                        "View": meta.get("view"),
-                        "Laterality": meta.get("laterality"),
-                        "Density group": meta.get("density_group"),
-                        "Abnormality type": meta.get("abnormality_type"),
-                        "Outcome (eval threshold)": meta.get("outcome"),
-                        "Saved probability (if test case)": meta.get("y_prob"),
-                    }
-                    st.table(pd.DataFrame([summary]))
 
             except Exception as e:
                 st.error(str(e))
-
 
 # -----------------------------
 # Tab 2: Batch Triage
 # -----------------------------
 with tab2:
     st.subheader("Batch Triage (Test Set)")
-    st.caption("Filter and export predictions from case_index.csv (risk-sorted).")
 
     if case_index is None or case_index.empty:
         st.warning("case_index.csv not found. Run: `py -m SRC.case_index`")
     else:
-        tp = int((case_index["outcome"] == "TP").sum())
-        fp = int((case_index["outcome"] == "FP").sum())
-        tn = int((case_index["outcome"] == "TN").sum())
-        fn = int((case_index["outcome"] == "FN").sum())
-        sens = tp / (tp + fn + 1e-8)
-        spec = tn / (tn + fp + 1e-8)
-        prec = tp / (tp + fp + 1e-8)
-        thr = float(test_metrics.get("threshold", eval_threshold if eval_threshold is not None else 0.5))
-
-        s1, s2, s3, s4, s5 = st.columns(5)
-        s1.metric("Cases", f"{len(case_index)}")
-        s2.metric("Sensitivity", f"{sens:.3f}")
-        s3.metric("Specificity", f"{spec:.3f}")
-        s4.metric("Precision", f"{prec:.3f}")
-        s5.metric("Eval threshold", f"{thr:.3f}")
-
-        st.divider()
-
         c1, c2, c3, c4 = st.columns(4)
         with c1:
             outc = st.multiselect(
@@ -701,28 +913,75 @@ with tab2:
             & case_index["view"].isin(view)
         ].copy()
 
-        df = df.sort_values("y_prob", ascending=False)
+        audit_available = ("audit_flag_any" in df.columns) and df["audit_flag_any"].notna().any()
+        if audit_available:
+            with st.expander("Shortcut-risk filters (audit)", expanded=False):
+                a1, a2, a3 = st.columns(3)
+                with a1:
+                    only_flagged = st.checkbox("Flagged only", value=False, key="bt_audit_only")
+                with a2:
+                    min_outside = st.slider("Min CAM outside-breast", 0.0, 1.0, 0.0, 0.01, key="bt_min_outside")
+                with a3:
+                    use_delta = st.checkbox("Use mask ablation filter", value=False, key="bt_use_delta")
+
+                max_delta = None
+                if use_delta:
+                    max_delta = st.slider("Max Δ prob (masked - original)", -1.0, 1.0, -0.05, 0.01, key="bt_max_delta")
+
+            df = apply_shortcut_filters(
+                df,
+                only_flagged=only_flagged,
+                min_outside=min_outside,
+                use_delta_filter=use_delta,
+                max_delta=max_delta,
+            )
+
+        sort_options = ["Risk score (p)"]
+        if "audit_delta_masked" in df.columns and df["audit_delta_masked"].notna().any():
+            sort_options.append("Largest drop when masked")
+        if "audit_cam_outside_ratio" in df.columns and df["audit_cam_outside_ratio"].notna().any():
+            sort_options.append("Highest CAM outside breast")
+
+        sort_mode = st.selectbox("Sort by", sort_options, index=0, key="bt_sort")
+        df = sort_triage(df, sort_mode)
+
+        # If policy is enabled and policy preds exist, compute a policy outcome
+        if use_density_policy and "y_pred_density_policy" in df.columns:
+            y_true = df["y_true"].astype(int)
+            y_pred_pol = df["y_pred_density_policy"].fillna(df["y_pred"]).astype(int)
+
+            df["outcome_density_policy"] = "TN"
+            df.loc[(y_true == 1) & (y_pred_pol == 1), "outcome_density_policy"] = "TP"
+            df.loc[(y_true == 0) & (y_pred_pol == 1), "outcome_density_policy"] = "FP"
+            df.loc[(y_true == 1) & (y_pred_pol == 0), "outcome_density_policy"] = "FN"
 
         st.write(f"Rows: **{len(df)}**")
-        st.dataframe(
-            df[
-                [
-                    "risk_rank",
-                    "patient_id",
-                    "abnormality_id",
-                    "view",
-                    "laterality",
-                    "density_group",
-                    "abnormality_type",
-                    "y_true",
-                    "y_prob",
-                    "y_pred",
-                    "outcome",
-                ]
-            ],
-            width="stretch",
-            height=520,
-        )
+
+        cols = [
+            "risk_rank",
+            "patient_id",
+            "abnormality_id",
+            "view",
+            "laterality",
+            "density_group",
+            "abnormality_type",
+            "y_true",
+            "y_prob",
+            "y_pred",
+            "outcome",
+        ]
+        for extra in ["audit_flag_any", "audit_cam_outside_ratio", "audit_delta_masked"]:
+            if extra in df.columns:
+                cols.append(extra)
+
+        if use_density_policy:
+            for extra in ["threshold_density_policy", "y_pred_density_policy", "outcome_density_policy"]:
+                if extra in df.columns:
+                    cols.append(extra)
+
+        cols = [c for c in cols if c in df.columns]
+
+        st.dataframe(df[cols], use_container_width=True, height=520)
 
         st.download_button(
             "Download filtered triage CSV",
@@ -731,71 +990,47 @@ with tab2:
             mime="text/csv",
         )
 
-
 # -----------------------------
 # Tab 3: Subgroup Performance
 # -----------------------------
 with tab3:
     st.subheader("Subgroup Performance")
-    st.caption("Uses subgroup_metrics.csv if valid; otherwise computes subgroup metrics from case_index (recommended).")
-
-    subgroup_use_file = False
-    if subgroup_file is not None and not subgroup_file.empty and "group" in subgroup_file.columns:
-        unknown_rate = (subgroup_file["group"].astype(str).str.lower() == "unknown").mean()
-        subgroup_use_file = unknown_rate < 0.80
-
-    prefer_live = st.toggle(
-        "Compute subgroup metrics from case_index (live)",
-        value=not subgroup_use_file,
-        key="sg_live_toggle",
-        help="Live computation guarantees it matches the case_index shown in the dashboard.",
-    )
 
     if case_index is None or case_index.empty:
         st.warning("case_index.csv not found. Run: `py -m SRC.case_index`")
     else:
-        if prefer_live or not subgroup_use_file:
-            group_by = st.selectbox(
-                "Group by",
-                ["density_group", "breast_density", "abnormality_type", "view", "laterality"],
-                key="sg_group_by_live",
-            )
-            df = compute_subgroup_from_case_index(case_index, group_by)
-            if df.empty:
-                st.warning("Could not compute subgroup metrics from case_index.")
-            else:
-                st.dataframe(df, width="stretch")
-
-                labels = df["group"].astype(str).tolist()
-                sens = df["sensitivity"].astype(float).tolist()
-                spec = df["specificity"].astype(float).tolist()
-
-                fig1, ax1 = plt.subplots()
-                ax1.bar(labels, sens)
-                ax1.set_title(f"Sensitivity by {group_by}")
-                ax1.set_ylabel("Sensitivity")
-                ax1.set_xlabel(group_by)
-                plt.xticks(rotation=30, ha="right")
-                fig1.tight_layout()
-                st.pyplot(fig1)
-
-                fig2, ax2 = plt.subplots()
-                ax2.bar(labels, spec)
-                ax2.set_title(f"Specificity by {group_by}")
-                ax2.set_ylabel("Specificity")
-                ax2.set_xlabel(group_by)
-                plt.xticks(rotation=30, ha="right")
-                fig2.tight_layout()
-                st.pyplot(fig2)
+        group_by = st.selectbox(
+            "Group by",
+            ["density_group", "breast_density", "abnormality_type", "view", "laterality"],
+            key="sg_group_by_live",
+        )
+        df = compute_subgroup_from_case_index(case_index, group_by)
+        if df.empty:
+            st.warning("Could not compute subgroup metrics from case_index.")
         else:
-            group_by = st.selectbox(
-                "Group by",
-                sorted(subgroup_file["group_by"].unique().tolist()),
-                key="sg_group_by_file",
-            )
-            df = subgroup_file[subgroup_file["group_by"] == group_by].copy()
-            st.dataframe(df, width="stretch")
+            st.dataframe(df, use_container_width=True)
 
+            labels = df["group"].astype(str).tolist()
+            sens = df["sensitivity"].astype(float).tolist()
+            spec = df["specificity"].astype(float).tolist()
+
+            fig1, ax1 = plt.subplots()
+            ax1.bar(labels, sens)
+            ax1.set_title(f"Sensitivity by {group_by}")
+            ax1.set_ylabel("Sensitivity")
+            ax1.set_xlabel(group_by)
+            plt.xticks(rotation=30, ha="right")
+            fig1.tight_layout()
+            st.pyplot(fig1)
+
+            fig2, ax2 = plt.subplots()
+            ax2.bar(labels, spec)
+            ax2.set_title(f"Specificity by {group_by}")
+            ax2.set_ylabel("Specificity")
+            ax2.set_xlabel(group_by)
+            plt.xticks(rotation=30, ha="right")
+            fig2.tight_layout()
+            st.pyplot(fig2)
 
 # -----------------------------
 # Tab 4: Model Info
@@ -804,7 +1039,6 @@ with tab4:
     st.subheader("Model & Run Information")
 
     c1, c2 = st.columns(2)
-
     with c1:
         st.write("### run_info.json")
         if run_info:
@@ -839,4 +1073,4 @@ with tab4:
             for i, (name, p) in enumerate(imgs):
                 if p.exists():
                     with cols[i % 2]:
-                        st.image(str(p), caption=name, width="stretch")
+                        st.image(str(p), caption=name, use_container_width=True)

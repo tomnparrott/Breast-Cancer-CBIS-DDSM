@@ -20,3 +20,15 @@ train:
 split:
   val_frac: 0.15
   test_frac: 0.15
+
+eval:
+  tta: false
+  target_specificity: 0.90
+  ece_bins: 10
+  threshold_sweep_steps: 101
+  bootstrap_n: 1000
+  bootstrap_n_subgroup: 500
+  bootstrap_seed: 42
+  failure_top_k: 12
+  explainability_audit: true
+  audit_max_cases: 0
