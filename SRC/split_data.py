@@ -3,6 +3,7 @@ import pandas as pd
 import yaml
 from sklearn.model_selection import GroupShuffleSplit
 
+# Split the manifest by patient so no patient appears in more than one split
 def split_by_patient(
     manifest: pd.DataFrame,
     val_frac: float,
@@ -47,6 +48,7 @@ def split_by_patient(
     return split_df
 
 
+# Load the manifest, create split files, and print a quick summary
 def main() -> None:
     cfg_path = Path("Configs/config.yaml")
     cfg = yaml.safe_load(cfg_path.read_text())

@@ -36,14 +36,17 @@ from SRC.model import make_resnet18_binary
 from SRC.inference import preprocess_series_dir, gradcam_resnet18, predict_proba
 
 
+# Evaluate the latest trained run and export metrics, figures, and audit artifacts
 # -----------------------------
 # Config / device / paths
 # -----------------------------
+# Load the shared config that drives evaluation settings and paths
 def load_config() -> dict:
     cfg_path = Path("Configs/config.yaml")
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Choose the best available device for batched evaluation
 def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -124,6 +127,7 @@ def predict_probs(
     return yt, yp
 
 
+# Compute the main threshold-based metrics from probabilities
 def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> dict:
     y_pred = (y_prob >= threshold).astype(int)
 
@@ -159,6 +163,7 @@ def compute_metrics(y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0
     }
 
 
+# Compute the same core metrics when predictions are already binary
 def compute_metrics_from_preds(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     y_true = y_true.astype(int).ravel()
     y_pred = y_pred.astype(int).ravel()
@@ -189,6 +194,7 @@ def compute_metrics_from_preds(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 # -----------------------------
 # Plots / figures
 # -----------------------------
+# Save the standard ROC, PR, and confusion-matrix figures for the run
 def save_roc_pr_cm(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray, threshold: float = 0.5) -> None:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -230,6 +236,7 @@ def save_roc_pr_cm(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray, thresh
     plt.close()
 
 
+# Find the best threshold that reaches a target specificity on the ROC curve
 def sensitivity_at_specificity(
     y_true: np.ndarray, y_prob: np.ndarray, target_spec: float = 0.90
 ) -> tuple[float, float, float]:
@@ -244,6 +251,7 @@ def sensitivity_at_specificity(
     best = valid[np.argmax(tpr[valid])]
     return float(tpr[best]), float(thresholds[best]), float(spec[best])
 
+# Find the best threshold that reaches a target sensitivity on the ROC curve
 def specificity_at_sensitivity(
     y_true: np.ndarray, y_prob: np.ndarray, target_sens: float = 0.90
 ) -> tuple[float, float, float]:
@@ -259,6 +267,7 @@ def specificity_at_sensitivity(
     return float(spec[best]), float(thresholds[best]), float(tpr[best])
 
 
+# Wrap threshold selection so subgroup calculations can fall back safely
 def safe_threshold_for_target_spec(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -282,6 +291,7 @@ def safe_threshold_for_target_spec(
         return float(fallback_threshold), float("nan"), float("nan"), "error"
 
 
+# Save the calibration plot that compares predicted risk with observed outcomes
 def save_calibration_curve(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> None:
     fig_dir = out_dir / "figures"
     fig_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +309,7 @@ def save_calibration_curve(out_dir: Path, y_true: np.ndarray, y_prob: np.ndarray
     plt.close()
 
 
+# Bin predicted probabilities so calibration error can be inspected numerically
 def _calibration_bins(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> pd.DataFrame:
     y_true = y_true.astype(int).ravel()
     y_prob = y_prob.astype(float).ravel()
@@ -344,6 +355,7 @@ def _calibration_bins(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) 
     return pd.DataFrame(rows)
 
 
+# Compute expected and maximum calibration error from the calibration bins
 def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> tuple[float, float, pd.DataFrame]:
     df_bins = _calibration_bins(y_true, y_prob, n_bins=n_bins)
     valid = df_bins["n"] > 0
@@ -355,6 +367,7 @@ def compute_ece(y_true: np.ndarray, y_prob: np.ndarray, n_bins: int = 10) -> tup
 # -----------------------------
 # Threshold sweep
 # -----------------------------
+# Evaluate the model across many thresholds for later analysis and plotting
 def threshold_sweep(y_true: np.ndarray, y_prob: np.ndarray, thresholds: Iterable[float]) -> pd.DataFrame:
     rows: list[dict] = []
     for t in thresholds:
@@ -378,12 +391,14 @@ def threshold_sweep(y_true: np.ndarray, y_prob: np.ndarray, thresholds: Iterable
 # -----------------------------
 # Bootstrap confidence intervals
 # -----------------------------
+# Pre-generate bootstrap index samples for repeatable resampling
 def _bootstrap_samples(y_true: np.ndarray, n_boot: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(int(seed))
     n = len(y_true)
     return rng.integers(0, n, size=(int(n_boot), n), endpoint=False)
 
 
+# Convert bootstrap samples into a percentile confidence interval
 def _ci_from_samples(values: np.ndarray, alpha: float = 0.05) -> tuple[float, float]:
     values = values[np.isfinite(values)]
     if values.size == 0:
@@ -393,6 +408,7 @@ def _ci_from_samples(values: np.ndarray, alpha: float = 0.05) -> tuple[float, fl
     return lo, hi
 
 
+# Bootstrap the key metrics so the report can show uncertainty ranges
 def bootstrap_cis(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -470,12 +486,14 @@ def bootstrap_cis(
 # -----------------------------
 # Subgroup helpers
 # -----------------------------
+# Ensure a metadata column exists before grouping or exporting
 def _ensure_col(df: pd.DataFrame, col: str, default: str = "Unknown") -> None:
     if col not in df.columns:
         df[col] = default
     df[col] = df[col].fillna(default).astype(str)
 
 
+# Collapse raw density labels into the grouped buckets used by analysis
 def _add_density_group(df: pd.DataFrame) -> None:
     if "breast_density" not in df.columns:
         df["density_group"] = "Unknown"
@@ -492,6 +510,7 @@ def _add_density_group(df: pd.DataFrame) -> None:
     df["density_group"] = df["breast_density"].map(to_group).astype(str)
 
 
+# Compute the same metrics separately for each metadata subgroup
 def compute_subgroup_metrics(df_pred: pd.DataFrame, group_col: str, threshold: float) -> list[dict]:
     out: list[dict] = []
     if group_col not in df_pred.columns:
@@ -533,6 +552,7 @@ def compute_subgroup_metrics(df_pred: pd.DataFrame, group_col: str, threshold: f
 # -----------------------------
 # Explainability audit + ablation summaries
 # -----------------------------
+# Build a simple breast-region mask from the display image for audit checks
 def build_breast_mask(img: np.ndarray) -> np.ndarray:
     img = np.asarray(img, dtype=np.float32)
     img = np.clip(img, 0.0, 1.0)
@@ -558,6 +578,7 @@ def build_breast_mask(img: np.ndarray) -> np.ndarray:
     return (lab == keep)
 
 
+# Measure how much Grad-CAM attention falls outside or near the breast region
 def cam_audit_metrics(cam: np.ndarray, breast_mask: np.ndarray, edge_margin: int = 12) -> dict:
     cam = np.asarray(cam, dtype=np.float32)
     cam = np.clip(cam, 0.0, 1.0)
@@ -601,6 +622,7 @@ def cam_audit_metrics(cam: np.ndarray, breast_mask: np.ndarray, edge_margin: int
     }
 
 
+# Clean strings before using them in failure-case folder names
 def _safe_stem(s: str, max_len: int = 80) -> str:
     s = str(s)
     keep = []
@@ -613,6 +635,7 @@ def _safe_stem(s: str, max_len: int = 80) -> str:
     return out[:max_len] if len(out) > max_len else out
 
 
+# Save the source image, heatmap, and overlay for one exported failure case
 def save_failure_case_images(
     case_dir: Path,
     img_disp: np.ndarray,
@@ -640,6 +663,7 @@ def save_failure_case_images(
     return {"input_png": str(p_in), "heatmap_png": str(p_hm), "overlay_png": str(p_ov)}
 
 
+# Add TP, FP, TN, and FN labels to the per-case prediction table
 def add_outcome_column(df: pd.DataFrame) -> None:
     if "outcome" in df.columns:
         return
@@ -649,6 +673,7 @@ def add_outcome_column(df: pd.DataFrame) -> None:
     df.loc[(df["y_true"] == 1) & (df["y_pred"] == 1), "outcome"] = "TP"
 
 
+# Summarise explainability audit flags overall and by key groupings
 def save_audit_summary(df_pred: pd.DataFrame, metrics_dir: Path) -> Path:
     if "audit_flag_any" not in df_pred.columns:
         out = pd.DataFrame([{"group_by": "overall", "group": "", "n": len(df_pred), "pct_flag_any": np.nan}])
@@ -685,6 +710,7 @@ def save_audit_summary(df_pred: pd.DataFrame, metrics_dir: Path) -> Path:
     return p_out
 
 
+# Save the raw mask-ablation cases and a grouped summary table
 def save_mask_ablation_outputs(ablation_rows: list[dict], metrics_dir: Path) -> tuple[Path, Path]:
     df = pd.DataFrame(ablation_rows)
     p_cases = metrics_dir / "audit_mask_ablation.csv"
@@ -727,6 +753,7 @@ def save_mask_ablation_outputs(ablation_rows: list[dict], metrics_dir: Path) -> 
 # -----------------------------
 # Patch C: Density-aware decision policy
 # -----------------------------
+# Learn a separate threshold per density group from the validation split
 def compute_density_policy_thresholds(
     df_val: pd.DataFrame,
     y_true_val: np.ndarray,
@@ -767,6 +794,7 @@ def compute_density_policy_thresholds(
     return pd.DataFrame(rows).sort_values("density_group")
 
 
+# Apply the learned density thresholds to test predictions and summarise results
 def apply_density_policy_to_test(
     df_test_pred: pd.DataFrame,
     thresholds_df: pd.DataFrame,
@@ -798,6 +826,7 @@ def apply_density_policy_to_test(
 # -----------------------------
 # Main
 # -----------------------------
+# Run the full evaluation pipeline and write all derived outputs
 def main() -> None:
     cfg = load_config()
 

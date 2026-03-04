@@ -18,14 +18,17 @@ from SRC.model import make_resnet18_binary
 from SRC.dataset import load_dicom_as_array, PadToSquare
 
 
+# Run one-off inference from a saved checkpoint and optionally generate Grad-CAM output
 # -----------------------------
 # Paths / Run discovery
 # -----------------------------
+# Resolve the repository root from the `SRC` package
 def project_root() -> Path:
     # SRC/ -> project root is one level up
     return Path(__file__).resolve().parents[1]
 
 
+# Load the shared config so inference uses the same settings as training
 def load_config() -> dict:
     cfg_path = project_root() / "Configs" / "config.yaml"
     if not cfg_path.exists():
@@ -34,6 +37,7 @@ def load_config() -> dict:
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Choose the best available inference device
 def get_device(prefer_cuda: bool = True) -> str:
     if prefer_cuda and torch.cuda.is_available():
         return "cuda"
@@ -42,6 +46,7 @@ def get_device(prefer_cuda: bool = True) -> str:
     return "cpu"
 
 
+# Resolve the processed data directory from config
 def processed_dir_from_cfg(cfg: dict) -> Path:
     return project_root() / Path(cfg["data"]["processed_dir"])
 
@@ -70,6 +75,7 @@ def list_run_dirs(processed_dir: Path) -> list[Path]:
     return runs
 
 
+# Map friendly checkpoint names like `best` or `final` to actual files
 def resolve_checkpoint_path(run_dir: Path, ckpt: str) -> Path:
     ckpt = ckpt.strip().lower()
     if ckpt in {"best", "model_best", "model_best.pt"}:
@@ -87,6 +93,7 @@ def resolve_checkpoint_path(run_dir: Path, ckpt: str) -> Path:
 # -----------------------------
 # Preprocessing
 # -----------------------------
+# Bundle the model input tensor together with the display image
 @dataclass
 class PreprocessOutput:
     x: torch.Tensor          # (1, C, H, W) model-ready tensor
@@ -135,6 +142,7 @@ def preprocess_series_dir(
 # -----------------------------
 # Model loading
 # -----------------------------
+# Rebuild the model architecture and load checkpoint weights onto it
 def load_model_from_checkpoint(ckpt_path: Path, device: str) -> nn.Module:
     """
     Loads ResNet18 binary model and applies checkpoint weights.
@@ -150,6 +158,7 @@ def load_model_from_checkpoint(ckpt_path: Path, device: str) -> nn.Module:
 # -----------------------------
 # Prediction (with optional TTA)
 # -----------------------------
+# Run the model and return a malignant probability
 @torch.no_grad()
 def predict_proba(model: nn.Module, x: torch.Tensor, device: str, tta: bool = False) -> float:
     """
@@ -169,6 +178,7 @@ def predict_proba(model: nn.Module, x: torch.Tensor, device: str, tta: bool = Fa
     return float(p.item())
 
 
+# Convert a probability into the binary class label used by the app
 def decision_from_threshold(prob: float, threshold: float) -> int:
     return int(prob >= threshold)
 
@@ -248,6 +258,7 @@ def gradcam_resnet18(
 # -----------------------------
 # Unseen data helpers (zip -> temp dir)
 # -----------------------------
+# Keep the temporary extraction directory alive while inference is using it
 @dataclass
 class ExtractedZip:
     series_dir: Path
@@ -257,6 +268,7 @@ class ExtractedZip:
         self._tmp.cleanup()
 
 
+# Extract an uploaded ZIP of DICOM files into a temporary folder
 def extract_zip_to_temp(zip_bytes: bytes) -> ExtractedZip:
     """
     Extract uploaded ZIP of DICOMs to a temporary directory.
@@ -274,6 +286,7 @@ def extract_zip_to_temp(zip_bytes: bytes) -> ExtractedZip:
 # -----------------------------
 # High-level API: run inference
 # -----------------------------
+# Tie together config loading, preprocessing, prediction, and optional Grad-CAM
 def run_inference(
     series_dir: Path,
     ckpt: str = "best",
@@ -334,6 +347,7 @@ def run_inference(
 # -----------------------------
 # CLI (quick verification)
 # -----------------------------
+# Provide a command-line entry point for quick local inference checks
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="Run inference on a DICOM series folder.")
     ap.add_argument("--series_dir", type=str, required=True, help="Path to a folder containing DICOMs.")

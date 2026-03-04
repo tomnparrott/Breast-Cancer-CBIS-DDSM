@@ -5,10 +5,12 @@ import pandas as pd
 import pytest
 
 
+# Resolve project-relative paths from the repo root
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# Load the shared pipeline config used to find processed outputs
 def _load_cfg() -> dict:
     import yaml
 
@@ -18,15 +20,18 @@ def _load_cfg() -> dict:
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Find the processed data directory defined in the config
 def _processed_dir(cfg: dict) -> Path:
     return _repo_root() / Path(cfg["data"]["processed_dir"])
 
 
+# Skip gracefully if a required file or folder is not available locally
 def _require_file(p: Path, why: str):
     if not p.exists():
         pytest.skip(f"{why} not found: {p}")
 
 
+# Resolve the most recent run recorded by the pipeline
 def _latest_run_dir(proc: Path) -> Path:
     latest_ptr = proc / "latest_run.txt"
     _require_file(latest_ptr, "latest_run.txt")
@@ -36,6 +41,7 @@ def _latest_run_dir(proc: Path) -> Path:
     return run_dir
 
 
+# Re-run one indexed case and compare it with the saved probability output
 @pytest.mark.slow
 @pytest.mark.data
 def test_inference_probability_matches_case_index_within_tolerance():

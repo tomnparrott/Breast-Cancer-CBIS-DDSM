@@ -12,6 +12,7 @@ from torchvision.transforms import functional as TF
 import pydicom
 
 
+# Pick the most useful DICOM file when a series folder contains multiple candidates
 def _choose_best_dicom(series_dir: Path) -> Path:
     """
     Some CBIS-DDSM folders can contain multiple DICOMs (e.g., different derived images).
@@ -47,6 +48,7 @@ def _choose_best_dicom(series_dir: Path) -> Path:
     return best_path
 
 
+# Apply DICOM intensity metadata and normalise the image to [0, 1]
 def _apply_rescale_window_and_scale(ds, img: np.ndarray) -> np.ndarray:
     # Apply rescale slope/intercept if present
     slope = float(getattr(ds, "RescaleSlope", 1.0))
@@ -87,6 +89,7 @@ def _apply_rescale_window_and_scale(ds, img: np.ndarray) -> np.ndarray:
     return img.astype(np.float32)
 
 
+# Crop away empty borders so the breast region fills more of the frame
 def _crop_to_foreground(img: np.ndarray, thr: float = 0.02, margin_frac: float = 0.03) -> np.ndarray:
     """
     Crops to non-background region to reduce black padding dominance.
@@ -121,6 +124,7 @@ def _crop_to_foreground(img: np.ndarray, thr: float = 0.02, margin_frac: float =
     return img[y0 : y1 + 1, x0 : x1 + 1]
 
 
+# Load one DICOM series folder into a 2D float image
 def load_dicom_as_array(series_dir: Path, crop_foreground: bool = True) -> np.ndarray:
     dcm_path = _choose_best_dicom(series_dir)
     ds = pydicom.dcmread(str(dcm_path))
@@ -134,6 +138,7 @@ def load_dicom_as_array(series_dir: Path, crop_foreground: bool = True) -> np.nd
     return img
 
 
+# Pad a tensor to a square shape before resizing
 class PadToSquare:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         # x is (C, H, W)
@@ -156,6 +161,7 @@ class PadToSquare:
         return TF.pad(x, padding, fill=0)
 
 
+# Turn manifest rows into tensors ready for the model
 class CbisDicomDataset(Dataset):
     def __init__(
         self,

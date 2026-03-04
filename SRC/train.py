@@ -23,11 +23,13 @@ from SRC.dataset import CbisDicomDataset
 from SRC.split_data import split_by_patient
 
 
+# Load the main training config from disk
 def load_config() -> dict:
     cfg_path = Path("Configs/config.yaml")
     return yaml.safe_load(cfg_path.read_text())
 
 
+# Choose the best available device for training and validation
 def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -36,6 +38,7 @@ def get_device() -> str:
     return "cpu"
 
 
+# Capture the current git commit for run metadata
 def get_git_hash() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
@@ -43,6 +46,7 @@ def get_git_hash() -> str:
         return "unknown"
 
 
+# Create a timestamped run directory and update the latest-run pointer
 def make_run_dir(processed_dir: Path, seed: int) -> Path:
     runs_root = processed_dir / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
@@ -54,6 +58,7 @@ def make_run_dir(processed_dir: Path, seed: int) -> Path:
     return run_dir
 
 
+# Save the environment and config snapshot needed to reproduce the run
 def write_run_info(run_dir: Path, cfg: dict) -> None:
     cfg_path = Path("Configs/config.yaml")
     cfg_text = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
@@ -72,6 +77,7 @@ def write_run_info(run_dir: Path, cfg: dict) -> None:
     (run_dir / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
 
 
+# Use the configured positive-class weight or infer one from the training labels
 def _resolve_pos_weight(cfg: dict, labels_np: np.ndarray) -> float:
     """
     Use cfg['train']['pos_weight'] if set to a sensible float.
@@ -94,11 +100,13 @@ def _resolve_pos_weight(cfg: dict, labels_np: np.ndarray) -> float:
     return neg / pos
 
 
+# Build the weighted BCE loss used for binary classification
 def make_bce_loss(pos_weight_value: float, device: str) -> nn.Module:
     pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
     return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
 
+# Run one validation pass and return the core metrics tracked during training
 @torch.no_grad()
 def evaluate(model: nn.Module, loader: DataLoader, device: str, criterion: nn.Module) -> dict:
     model.eval()
@@ -146,6 +154,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, criterion: nn.Mo
     }
 
 
+# Train the model, validate each epoch, and save the run artifacts
 def main() -> None:
     cfg = load_config()
     seed = int(cfg["seed"])

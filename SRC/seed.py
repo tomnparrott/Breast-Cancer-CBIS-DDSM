@@ -2,6 +2,7 @@ import random
 import numpy as np
 import torch
 
+# Set all random seeds and deterministic flags used by the training pipeline
 def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)

@@ -12,16 +12,19 @@ import pandas as pd
 # -----------------------------
 # Run / eval discovery
 # -----------------------------
+# Resolve repository-relative paths from this module location
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# Load the config used to find processed data and run outputs
 def load_config() -> dict:
     import yaml
     cfg_path = project_root() / "Configs" / "config.yaml"
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Resolve the latest run directory recorded by training
 def resolve_latest_run_dir(processed_dir: Path) -> Path:
     latest_ptr = processed_dir / "latest_run.txt"
     if latest_ptr.exists():
@@ -32,6 +35,7 @@ def resolve_latest_run_dir(processed_dir: Path) -> Path:
     return processed_dir
 
 
+# Find the newest metrics folder created by the evaluation step
 def find_latest_eval_metrics_dir(run_dir: Path) -> Path:
     """
     Expects structure produced by eval.py:
@@ -67,6 +71,7 @@ def find_latest_eval_metrics_dir(run_dir: Path) -> Path:
 # -----------------------------
 # Helpers
 # -----------------------------
+# Collapse density values into the grouped labels used by the dashboard
 def add_density_group(df: pd.DataFrame) -> None:
     if "breast_density" not in df.columns:
         df["density_group"] = "Unknown"
@@ -83,6 +88,7 @@ def add_density_group(df: pd.DataFrame) -> None:
     df["density_group"] = df["breast_density"].map(to_group).astype(str)
 
 
+# Convert ground truth and prediction values into confusion-matrix labels
 def outcome_label(y_true: int, y_pred: int) -> str:
     if y_true == 1 and y_pred == 1:
         return "TP"
@@ -93,6 +99,7 @@ def outcome_label(y_true: int, y_pred: int) -> str:
     return "FN"
 
 
+# Read the evaluation threshold saved with the latest metrics
 def load_threshold_from_metrics(metrics_json_path: Path) -> float:
     """
     Uses the same threshold that eval.py used for the confusion matrix.
@@ -122,6 +129,7 @@ def load_threshold_from_metrics(metrics_json_path: Path) -> float:
 # -----------------------------
 # Core
 # -----------------------------
+# Build the per-case index used by Streamlit and case review workflows
 def build_case_index(
     splits_csv: Path,
     metrics_dir: Path,
@@ -203,6 +211,7 @@ def build_case_index(
     return df, threshold
 
 
+# Resolve the latest run outputs and write the case index files
 def main() -> None:
     cfg = load_config()
     processed_dir = project_root() / Path(cfg["data"]["processed_dir"])

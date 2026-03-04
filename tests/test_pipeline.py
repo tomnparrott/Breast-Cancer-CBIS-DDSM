@@ -7,10 +7,12 @@ import pandas as pd
 import pytest
 
 
+# Resolve paths relative to the project root
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# Load the shared config used by the training and eval pipeline
 def _load_cfg() -> dict:
     import yaml
 
@@ -20,15 +22,18 @@ def _load_cfg() -> dict:
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Find the processed data directory declared in the config
 def _processed_dir(cfg: dict) -> Path:
     return _repo_root() / Path(cfg["data"]["processed_dir"])
 
 
+# Skip gracefully when a local artifact is not available
 def _require_file(p: Path, why: str):
     if not p.exists():
         pytest.skip(f"{why} not found: {p}")
 
 
+# Check the processed manifest exposes the fields downstream code expects
 @pytest.mark.data
 def test_manifest_has_required_columns():
     cfg = _load_cfg()
@@ -44,6 +49,7 @@ def test_manifest_has_required_columns():
     assert len(df) > 0, "manifest.csv is empty"
 
 
+# Verify patient IDs stay isolated across train, val, and test splits
 @pytest.mark.data
 def test_splits_exist_and_have_no_patient_leakage():
     cfg = _load_cfg()
@@ -66,6 +72,7 @@ def test_splits_exist_and_have_no_patient_leakage():
     assert splits["val"].isdisjoint(splits["test"]), "patient_id leakage: val vs test"
 
 
+# Smoke test one dataset item to confirm key outputs and tensor shapes
 @pytest.mark.data
 def test_dataset_item_shapes_smoke():
     """
@@ -108,6 +115,7 @@ def test_dataset_item_shapes_smoke():
     assert torch.isfinite(x).all(), "image tensor contains NaN/Inf"
 
 
+# Check the latest metrics JSON still matches the schema used by evaluation tooling
 @pytest.mark.data
 def test_eval_outputs_schema_smoke():
     """
@@ -142,6 +150,7 @@ def test_eval_outputs_schema_smoke():
     assert "operating_points" in metrics and isinstance(metrics["operating_points"], dict)
 
 
+# Run one inference pass and confirm the image and Grad-CAM outputs look structurally valid
 @pytest.mark.slow
 @pytest.mark.data
 def test_inference_and_gradcam_shapes_smoke():

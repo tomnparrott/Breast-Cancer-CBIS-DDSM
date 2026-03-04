@@ -12,6 +12,7 @@ def pathology_to_label(pathology: str) -> int:
     return 0
 
 
+# Search parent folders for one of the CBIS metadata CSV files
 def _find_csv_upwards(start_dir: Path, filename: str, max_levels: int = 4) -> Optional[Path]:
     d = start_dir
     for _ in range(max_levels + 1):
@@ -22,6 +23,7 @@ def _find_csv_upwards(start_dir: Path, filename: str, max_levels: int = 4) -> Op
     return None
 
 
+# Return the first populated value from a list of possible column names
 def _first_present(row: pd.Series, keys: list[str]) -> Optional[Any]:
     for k in keys:
         if k in row.index:
@@ -32,6 +34,7 @@ def _first_present(row: pd.Series, keys: list[str]) -> Optional[Any]:
     return None
 
 
+# Normalise density values into the string labels used downstream
 def _parse_density(val: Any) -> str:
     """
     CBIS density is typically 1-4. Keep as string to make grouping easy.
@@ -48,6 +51,7 @@ def _parse_density(val: Any) -> str:
         return "Unknown"
 
 
+# Standardise laterality values for reporting and grouping
 def _normalise_laterality(val: Any) -> str:
     if val is None or pd.isna(val):
         return "Unknown"
@@ -59,6 +63,7 @@ def _normalise_laterality(val: Any) -> str:
     return "Unknown"
 
 
+# Standardise mammography view labels
 def _normalise_view(val: Any) -> str:
     if val is None or pd.isna(val):
         return "Unknown"
@@ -76,6 +81,7 @@ def _normalise_view(val: Any) -> str:
     return "Unknown"
 
 
+# Infer the abnormality type from folder names or source CSV names
 def _abnormality_from_folder(folder_name: Optional[str], source_csv: str) -> str:
     if folder_name:
         if folder_name.startswith("Calc-"):

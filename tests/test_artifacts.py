@@ -7,10 +7,12 @@ import pandas as pd
 import pytest
 
 
+# Resolve all test paths from the repository root
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# Load the shared config that tells the tests where processed outputs live
 def _load_cfg() -> dict:
     import yaml
 
@@ -20,16 +22,19 @@ def _load_cfg() -> dict:
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Resolve the processed data directory from config
 def _processed_dir(cfg: dict) -> Path:
     # Works for both relative and absolute paths
     return _repo_root() / Path(cfg["data"]["processed_dir"])
 
 
+# Skip the test when a required local artifact is not present
 def _require_file(p: Path, why: str):
     if not p.exists():
         pytest.skip(f"{why} not found: {p}")
 
 
+# Resolve the latest recorded training run directory
 def _latest_run_dir(proc: Path) -> Path:
     latest_ptr = proc / "latest_run.txt"
     _require_file(latest_ptr, "latest_run.txt")
@@ -39,6 +44,7 @@ def _latest_run_dir(proc: Path) -> Path:
     return run_dir
 
 
+# Find the newest metrics folder created by evaluation
 def _find_latest_metrics_dir(run_dir: Path) -> Path | None:
     # finds .../eval_outputs/**/metrics
     candidates = sorted(
@@ -49,6 +55,7 @@ def _find_latest_metrics_dir(run_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+# Locate `case_index.csv` whether it was saved at run level or metrics level
 def _find_case_index(run_dir: Path, metrics_dir: Path | None) -> Path | None:
     p1 = run_dir / "case_index.csv"
     if p1.exists():
@@ -60,6 +67,7 @@ def _find_case_index(run_dir: Path, metrics_dir: Path | None) -> Path | None:
     return None
 
 
+# Confirm the latest run kept both best and final checkpoints
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_checkpoints_exist():
@@ -74,6 +82,7 @@ def test_checkpoints_exist():
     _require_file(final, "model_final.pt")
 
 
+# Check run metadata exists and still includes the core provenance fields
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_run_info_exists_and_has_core_keys():
@@ -89,6 +98,7 @@ def test_run_info_exists_and_has_core_keys():
         assert k in info, f"Missing key in run_info.json: {k}"
 
 
+# Verify the latest evaluation produced the expected core artifact files
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_eval_outputs_exist_and_have_expected_files():
@@ -128,6 +138,7 @@ def test_eval_outputs_exist_and_have_expected_files():
     assert case_index_path is not None and case_index_path.exists(), "case_index.csv missing (run: py -m SRC.case_index)"
 
 
+# Check the standard evaluation figures were generated
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_figures_exist():
@@ -152,6 +163,7 @@ def test_figures_exist():
     assert not missing, f"Missing figure(s): {missing}"
 
 
+# Validate the audit ablation CSV includes the columns used by analysis code
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_audit_artifacts_schema():
@@ -184,7 +196,9 @@ def test_audit_artifacts_schema():
     }
     assert required_cols.issubset(set(ab.columns)), f"Missing cols: {required_cols - set(ab.columns)}"
 
+### Do i need to do @pytest.mark.data for all three functions? Circle back to this
 
+# Validate the density-policy CSV outputs before downstream reporting uses them
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_density_policy_artifacts_schema():
@@ -211,7 +225,32 @@ def test_density_policy_artifacts_schema():
     assert required_res.issubset(set(res.columns)), f"Missing cols in density_policy_test_results.csv: {required_res - set(res.columns)}"
     assert (res["group_by"] == "overall").any(), "density_policy_test_results.csv missing overall row"
 
+# Confirm prediction metadata includes the density-policy columns added by evaluation
+@pytest.mark.data
+@pytest.mark.artifacts
+def test_test_predictions_with_meta_has_density_policy_columns():
+    cfg = _load_cfg()
+    proc = _processed_dir(cfg)
+    run_dir = _latest_run_dir(proc)
 
+    metrics_dir = _find_latest_metrics_dir(run_dir)
+    if metrics_dir is None:
+        pytest.skip(f"No eval_outputs/**/metrics found under {run_dir}")
+
+    p = metrics_dir / "test_predictions_with_meta.csv"
+    _require_file(p, "test_predictions_with_meta.csv")
+
+    df = pd.read_csv(p)
+
+    required = {"threshold_density_policy", "y_pred_density_policy"}
+    missing = required - set(df.columns)
+    assert not missing, f"Missing density-policy columns in test_predictions_with_meta.csv: {missing}"
+
+    # light sanity checks (avoid brittle assertions)
+    assert df["threshold_density_policy"].notna().any(), "threshold_density_policy is all NaN"
+    assert set(df["y_pred_density_policy"].dropna().astype(int).unique()).issubset({0, 1}), "y_pred_density_policy not binary"
+
+# Check the case index keeps the fields needed for case review and ranking
 @pytest.mark.data
 @pytest.mark.artifacts
 def test_case_index_schema_and_sanity():

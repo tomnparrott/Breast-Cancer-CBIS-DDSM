@@ -22,6 +22,7 @@ from SRC.inference import (
     ExtractedZip,
 )
 
+# Streamlit dashboard for reviewing saved run outputs and running case-level inference
 # -----------------------------
 # Page config
 # -----------------------------
@@ -33,6 +34,7 @@ st.caption("Research/demo tool. Not for clinical use.")
 # -----------------------------
 # Utilities
 # -----------------------------
+# Read JSON safely so missing or malformed files do not break the dashboard
 def safe_read_json(p: Path) -> dict:
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -40,6 +42,7 @@ def safe_read_json(p: Path) -> dict:
         return {}
 
 
+# Find the newest evaluation metrics folder for the selected run
 def find_latest_eval_metrics_dir(run_dir: Path) -> Path | None:
     """
     Expected structure:
@@ -67,6 +70,7 @@ def find_latest_eval_metrics_dir(run_dir: Path) -> Path | None:
 
 
 @st.cache_data
+# Cache the manifest because it is reused across reruns and tabs
 def load_manifest(processed_dir: Path) -> pd.DataFrame | None:
     p = processed_dir / "manifest.csv"
     if not p.exists():
@@ -74,6 +78,7 @@ def load_manifest(processed_dir: Path) -> pd.DataFrame | None:
     return pd.read_csv(p)
 
 
+# Collapse raw density labels into the grouped buckets used throughout the UI
 def add_density_group(df: pd.DataFrame) -> None:
     def to_group(v: object) -> str:
         s = str(v).strip()
@@ -89,6 +94,7 @@ def add_density_group(df: pd.DataFrame) -> None:
     df["density_group"] = df["breast_density"].map(to_group).astype(str)
 
 
+# Add TP, FP, TN, and FN labels to a prediction table when needed
 def add_outcome_column(df: pd.DataFrame) -> None:
     if "outcome" in df.columns:
         return
@@ -98,6 +104,7 @@ def add_outcome_column(df: pd.DataFrame) -> None:
     df.loc[(df["y_true"] == 1) & (df["y_pred"] == 1), "outcome"] = "TP"
 
 
+# Fill the case index with manifest metadata so the review screens are richer
 def enrich_case_index(case_index: pd.DataFrame, manifest: pd.DataFrame | None) -> pd.DataFrame:
     if case_index is None or case_index.empty:
         return case_index
@@ -143,6 +150,7 @@ def enrich_case_index(case_index: pd.DataFrame, manifest: pd.DataFrame | None) -
     return df
 
 
+# Recompute subgroup metrics directly from the case index for live dashboard views
 def compute_subgroup_from_case_index(case_index: pd.DataFrame, group_col: str) -> pd.DataFrame:
     if case_index is None or case_index.empty or group_col not in case_index.columns:
         return pd.DataFrame()
@@ -182,6 +190,7 @@ def compute_subgroup_from_case_index(case_index: pd.DataFrame, group_col: str) -
     return pd.DataFrame(rows).sort_values("n", ascending=False)
 
 
+# Render the mammogram with the Grad-CAM heatmap on top
 def overlay_fig(img: np.ndarray, cam: np.ndarray, alpha: float = 0.35) -> plt.Figure:
     fig, ax = plt.subplots()
     ax.imshow(img, cmap="gray")
@@ -191,6 +200,7 @@ def overlay_fig(img: np.ndarray, cam: np.ndarray, alpha: float = 0.35) -> plt.Fi
     return fig
 
 
+# Render the Grad-CAM map on its own
 def heatmap_fig(cam: np.ndarray) -> plt.Figure:
     fig, ax = plt.subplots()
     ax.imshow(cam)
@@ -199,10 +209,12 @@ def heatmap_fig(cam: np.ndarray) -> plt.Figure:
     return fig
 
 
+# Translate the binary prediction into dashboard wording
 def triage_label(pred_label: int) -> str:
     return "Flag for radiologist review" if pred_label == 1 else "No flag"
 
 
+# Prefer the saved evaluation threshold when one is available
 def resolve_eval_threshold(case_index: pd.DataFrame | None, test_metrics: dict) -> float | None:
     if case_index is not None and not case_index.empty and "threshold_used" in case_index.columns:
         try:
@@ -219,6 +231,7 @@ def resolve_eval_threshold(case_index: pd.DataFrame | None, test_metrics: dict) 
     return None
 
 
+# Clean up any temporary folder created for an uploaded ZIP case
 def cleanup_zip_session() -> None:
     old: ExtractedZip | None = st.session_state.get("uploaded_zip_obj", None)
     if old is not None:
@@ -230,6 +243,7 @@ def cleanup_zip_session() -> None:
     st.session_state["uploaded_zip_name"] = None
 
 
+# Show the main prediction, threshold, and recommendation summary
 def decision_panel(prob: float, pred: int, thr: float, mode_text: str, y_true: int | None) -> None:
     rec = triage_label(pred)
     if pred == 1:
@@ -256,6 +270,7 @@ def decision_panel(prob: float, pred: int, thr: float, mode_text: str, y_true: i
         )
 
 
+# Explain the purpose and limits of the visual explanation panel
 def why_panel(viz_mode: str, show_gradcam: bool) -> None:
     st.write("#### Why this decision?")
     st.write(
@@ -270,6 +285,7 @@ def why_panel(viz_mode: str, show_gradcam: bool) -> None:
 # -----------------------------
 # Audit / policy merge helpers
 # -----------------------------
+# Normalise image paths so artifact tables can be merged reliably
 def _norm_path_series(s: pd.Series) -> pd.Series:
     return (
         s.astype(str)
@@ -280,6 +296,7 @@ def _norm_path_series(s: pd.Series) -> pd.Series:
     )
 
 
+# Attach audit and density-policy fields onto the case index table
 def merge_audit_fields(case_index: pd.DataFrame | None, preds_meta: pd.DataFrame | None) -> pd.DataFrame | None:
     """
     Merge audit + density-policy fields from test_predictions_with_meta.csv into case_index.
@@ -334,6 +351,7 @@ def merge_audit_fields(case_index: pd.DataFrame | None, preds_meta: pd.DataFrame
     return out
 
 
+# Apply the optional audit shortcut filters used in review and triage tabs
 def apply_shortcut_filters(
     df: pd.DataFrame,
     only_flagged: bool,
@@ -359,6 +377,7 @@ def apply_shortcut_filters(
     return out
 
 
+# Sort review tables by the user-selected risk or audit priority
 def sort_triage(df: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
     if sort_mode == "Risk score (p)":
         return df.sort_values("y_prob", ascending=False)
@@ -376,6 +395,7 @@ def sort_triage(df: pd.DataFrame, sort_mode: str) -> pd.DataFrame:
     return df.sort_values("y_prob", ascending=False)
 
 
+# Clear the case-review controls stored in Streamlit session state
 def reset_case_review_filters() -> None:
     for k in [
         "cr_outcome",
@@ -395,6 +415,7 @@ def reset_case_review_filters() -> None:
 # -----------------------------
 # Sidebar: Run + model settings
 # -----------------------------
+# Load config and resolve the currently selected run before building the UI
 cfg = load_config()
 proc_dir = processed_dir_from_cfg(cfg)
 latest_run_dir = resolve_latest_run_dir(proc_dir)
@@ -441,6 +462,7 @@ with st.sidebar:
 
 
 @st.cache_resource
+# Cache the loaded model so Streamlit reruns do not reload checkpoint weights
 def get_model_cached(ckpt_path_str: str, device: str):
     ckpt = Path(ckpt_path_str)
     return load_model_from_checkpoint(ckpt, device=device)
@@ -453,6 +475,7 @@ img_size = int(cfg["data"]["img_size"])
 # -----------------------------
 # Load artefacts
 # -----------------------------
+# Load the saved case index produced by the post-eval indexing step
 def load_case_index(run_dir: Path) -> pd.DataFrame | None:
     mdir = find_latest_eval_metrics_dir(run_dir)
     if mdir is not None:
@@ -467,6 +490,7 @@ def load_case_index(run_dir: Path) -> pd.DataFrame | None:
     return None
 
 
+# Load the richer per-case predictions table used for audit and policy fields
 def load_test_predictions_with_meta(run_dir: Path) -> pd.DataFrame | None:
     mdir = find_latest_eval_metrics_dir(run_dir)
     if mdir is None:
@@ -482,6 +506,7 @@ def load_test_predictions_with_meta(run_dir: Path) -> pd.DataFrame | None:
     return None
 
 
+# Load the precomputed subgroup metrics export if it exists
 def load_subgroup_metrics(run_dir: Path) -> pd.DataFrame | None:
     mdir = find_latest_eval_metrics_dir(run_dir)
     if mdir is None:
@@ -492,6 +517,7 @@ def load_subgroup_metrics(run_dir: Path) -> pd.DataFrame | None:
     return None
 
 
+# Load the latest test metrics JSON for summary displays
 def load_test_metrics(run_dir: Path) -> dict:
     mdir = find_latest_eval_metrics_dir(run_dir)
     if mdir is None:
@@ -500,11 +526,13 @@ def load_test_metrics(run_dir: Path) -> dict:
     return safe_read_json(p)
 
 
+# Load the run metadata captured during training
 def load_run_info(run_dir: Path) -> dict:
     p = run_dir / "run_info.json"
     return safe_read_json(p)
 
 
+# Gather the saved artifacts that feed the dashboard tabs
 manifest_df = load_manifest(proc_dir)
 
 case_index_raw = load_case_index(run_dir)

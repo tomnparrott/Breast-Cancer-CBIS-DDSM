@@ -5,10 +5,12 @@ import json
 import pytest
 
 
+# Resolve file lookups from the repository root
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# Load the main config and skip if the local project setup is incomplete
 def _load_cfg() -> dict:
     import yaml
 
@@ -18,15 +20,18 @@ def _load_cfg() -> dict:
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
 
+# Find the processed data directory referenced by the config
 def _processed_dir(cfg: dict) -> Path:
     return _repo_root() / Path(cfg["data"]["processed_dir"])
 
 
+# Skip cleanly when a required artifact is absent on this machine
 def _require_file(p: Path, why: str):
     if not p.exists():
         pytest.skip(f"{why} not found: {p}")
 
 
+# Resolve the run directory pointed to by `latest_run.txt`
 def _latest_run_dir(proc: Path) -> Path:
     latest_ptr = proc / "latest_run.txt"
     _require_file(latest_ptr, "latest_run.txt")
@@ -36,6 +41,7 @@ def _latest_run_dir(proc: Path) -> Path:
     return run_dir
 
 
+# Pick the newest metrics file generated under the eval outputs tree
 def _find_latest_test_metrics(run_dir: Path) -> Path | None:
     candidates = sorted(
         run_dir.glob("eval_outputs/**/metrics/test_metrics.json"),
@@ -45,6 +51,7 @@ def _find_latest_test_metrics(run_dir: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+# Guard against major metric regressions in the latest saved run
 @pytest.mark.data
 @pytest.mark.quality
 def test_quality_gates_not_terrible():
@@ -76,6 +83,7 @@ def test_quality_gates_not_terrible():
     assert brier <= 0.35, f"Brier score too high (worse calibration): {brier}"
 
 
+# Confirm the selected operating point is present and internally valid
 @pytest.mark.data
 @pytest.mark.quality
 def test_operating_point_present_and_reasonable():
