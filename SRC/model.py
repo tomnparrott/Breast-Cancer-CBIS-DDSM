@@ -2,9 +2,9 @@ import torch
 import torch.nn as nn
 from torchvision.models import resnet18, ResNet18_Weights
 
-# Build the ResNet18 binary classifier used by training and inference
+# Build the ResNet18 binary classifier
 def make_resnet18_binary(pretrained: bool = True) -> nn.Module:
-    # If True, use ImageNet weights
+    # Use ImageNet weights for the convolutional backbone 
     weights = ResNet18_Weights.DEFAULT if pretrained else None
     model = resnet18(weights=weights)
 

@@ -4,7 +4,6 @@ import pandas as pd
 
 from SRC.cbis_manifest import build_tcia_manifest
 
-
 # Build the processed manifest CSV from the raw CBIS-DDSM metadata and folders
 def main() -> None:
     # Load the config to find the raw and processed data directories
@@ -20,8 +19,8 @@ def main() -> None:
     # Create the unified manifest table used by the rest of the pipeline
     manifest = build_tcia_manifest(raw_dir)
 
-    # Print a quick summary so the manifest can be checked at a glance
-    print("\n=== MANIFEST SUMMARY ===")
+    # Print a summary of the manifest
+    print("\n Manifest Summary:")
     print(f"Rows: {len(manifest)}")
     print(f"Unique patients: {manifest['patient_id'].nunique()}")
     print("Label counts (0=benign, 1=malignant):")
@@ -30,11 +29,10 @@ def main() -> None:
     missing_dirs = (manifest["image_dir"].astype(str).str.len() == 0).sum()
     print(f"Empty image_dir rows: {missing_dirs}")
 
-    # Save the manifest for downstream splitting, training, and evaluation
+    # Save the manifest for splitting, training, and evaluation
     out_path = processed_dir / "manifest.csv"
     manifest.to_csv(out_path, index=False)
     print(f"\nSaved: {out_path}\n")
-
 
 if __name__ == "__main__":
     main()

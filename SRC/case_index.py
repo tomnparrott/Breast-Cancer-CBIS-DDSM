@@ -8,21 +8,15 @@ import json
 import numpy as np
 import pandas as pd
 
-
-# -----------------------------
-# Run / eval discovery
-# -----------------------------
-# Resolve repository-relative paths from this module location
+# Resolve paths
 def project_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
 
 # Load the config used to find processed data and run outputs
 def load_config() -> dict:
     import yaml
     cfg_path = project_root() / "Configs" / "config.yaml"
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-
 
 # Resolve the latest run directory recorded by training
 def resolve_latest_run_dir(processed_dir: Path) -> Path:
@@ -34,14 +28,8 @@ def resolve_latest_run_dir(processed_dir: Path) -> Path:
             return candidate
     return processed_dir
 
-
 # Find the newest metrics folder created by the evaluation step
 def find_latest_eval_metrics_dir(run_dir: Path) -> Path:
-    """
-    Expects structure produced by eval.py:
-      run_dir/eval_outputs/YYYY-MM-DD/<run_name>/metrics/
-    Picks the latest date folder (lexicographic works for YYYY-MM-DD).
-    """
     root = run_dir / "eval_outputs"
     if not root.exists():
         raise FileNotFoundError(f"No eval_outputs folder found in: {run_dir}")
@@ -53,13 +41,11 @@ def find_latest_eval_metrics_dir(run_dir: Path) -> Path:
     date_dirs.sort(key=lambda p: p.name)
     latest_date_dir = date_dirs[-1]
 
-    # Prefer matching run_name folder if present
     run_name = run_dir.name
     candidate = latest_date_dir / run_name / "metrics"
     if candidate.exists():
         return candidate
 
-    # Otherwise, use the first child run folder found under latest date
     run_folders = [p for p in latest_date_dir.iterdir() if p.is_dir()]
     if not run_folders:
         raise FileNotFoundError(f"No run folders inside: {latest_date_dir}")
@@ -67,10 +53,8 @@ def find_latest_eval_metrics_dir(run_dir: Path) -> Path:
     run_folders.sort(key=lambda p: p.name)
     return run_folders[-1] / "metrics"
 
+# Helper functions #
 
-# -----------------------------
-# Helpers
-# -----------------------------
 # Collapse density values into the grouped labels used by the dashboard
 def add_density_group(df: pd.DataFrame) -> None:
     if "breast_density" not in df.columns:
@@ -87,8 +71,7 @@ def add_density_group(df: pd.DataFrame) -> None:
 
     df["density_group"] = df["breast_density"].map(to_group).astype(str)
 
-
-# Convert ground truth and prediction values into confusion-matrix labels
+# Convert prediction values into confusion matrix labels
 def outcome_label(y_true: int, y_pred: int) -> str:
     if y_true == 1 and y_pred == 1:
         return "TP"
@@ -98,13 +81,8 @@ def outcome_label(y_true: int, y_pred: int) -> str:
         return "TN"
     return "FN"
 
-
 # Read the evaluation threshold saved with the latest metrics
 def load_threshold_from_metrics(metrics_json_path: Path) -> float:
-    """
-    Uses the same threshold that eval.py used for the confusion matrix.
-    Falls back to threshold_at_spec_0.90 if present, else 0.5.
-    """
     if not metrics_json_path.exists():
         return 0.5
 
@@ -125,47 +103,46 @@ def load_threshold_from_metrics(metrics_json_path: Path) -> float:
 
     return 0.5
 
+# Core functions
 
-# -----------------------------
-# Core
-# -----------------------------
-# Build the per-case index used by Streamlit and case review workflows
+# Build the per case index used by Streamlit for the dashboard
 def build_case_index(
     splits_csv: Path,
     metrics_dir: Path,
     threshold_override: Optional[float] = None,
 ) -> Tuple[pd.DataFrame, float]:
     """
-    Builds a per-case table for Streamlit:
+    Builds a per-case table for Dashboard:
       - includes metadata
       - attaches y_true/y_prob/y_pred
-      - labels TP/FP/TN/FN at the eval threshold
-      - ranks by risk (descending prob)
+      - labels TP/FP/TN/FN at the evaluation threshold
+      - ranks by risk 
     """
     splits = pd.read_csv(splits_csv)
     test_df = splits[splits["split"] == "test"].copy().reset_index(drop=True)
 
-    # Prefer the richer file produced by eval.py
     pred_with_meta = metrics_dir / "test_predictions_with_meta.csv"
     metrics_json = metrics_dir / "test_metrics.json"
     threshold = float(threshold_override) if threshold_override is not None else load_threshold_from_metrics(metrics_json)
 
+    # Predictions with metadata 
     if pred_with_meta.exists():
         df = pd.read_csv(pred_with_meta)
-        # Ensure it has what we need
+        # Check columns are present
         if "y_true" not in df.columns or "y_prob" not in df.columns:
             raise RuntimeError(f"{pred_with_meta} exists but is missing y_true/y_prob.")
         if "y_pred" not in df.columns:
             df["y_pred"] = (df["y_prob"].astype(float) >= threshold).astype(int)
     else:
-        # Fallback: use splits test_df + test_preds.npz
+        # If not, use splits test_df + test_preds.npz
         preds_npz = metrics_dir / "test_preds.npz"
         if not preds_npz.exists():
             raise FileNotFoundError(
-                "Missing both test_predictions_with_meta.csv and test_preds.npz in metrics dir. "
+                "Missing both test_predictions_with_meta.csv and test_preds.npz in metrics dir"
                 f"Expected at: {pred_with_meta} or {preds_npz}"
             )
-
+        
+        # Load the .npz predictions and attach to test_df
         data = np.load(preds_npz)
         y_true = data["y_true"].astype(int).ravel()
         y_prob = data["y_prob"].astype(float).ravel()
@@ -181,7 +158,7 @@ def build_case_index(
         df["y_prob"] = y_prob
         df["y_pred"] = (df["y_prob"] >= threshold).astype(int)
 
-    # Ensure key meta columns exist (older runs might not)
+    # Ensure  meta columns exist
     for col, default in [
         ("breast_density", "Unknown"),
         ("abnormality_type", "unknown"),
@@ -201,7 +178,7 @@ def build_case_index(
         outcome_label(int(t), int(p)) for t, p in zip(df["y_true"].astype(int), df["y_pred"].astype(int))
     ]
 
-    # Risk rank (1 = highest probability)
+    # Risk rank (1 = highest probability of malignancy)
     df["risk_rank"] = df["y_prob"].rank(ascending=False, method="first").astype(int)
     df = df.sort_values("y_prob", ascending=False).reset_index(drop=True)
 
@@ -210,13 +187,13 @@ def build_case_index(
 
     return df, threshold
 
-
-# Resolve the latest run outputs and write the case index files
+# Latest run outputs and write the case index files
 def main() -> None:
     cfg = load_config()
     processed_dir = project_root() / Path(cfg["data"]["processed_dir"])
     run_dir = resolve_latest_run_dir(processed_dir)
 
+    # Check for splits.csv
     splits_csv = processed_dir / "splits.csv"
     if not splits_csv.exists():
         raise FileNotFoundError(f"Missing splits.csv at: {splits_csv}")
@@ -241,13 +218,12 @@ def main() -> None:
     }
     out_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
-    # Convenience copy at run root (easy for Streamlit)
+    # Copy case index to the run directory for easy access by the dashboard
     df.to_csv(run_dir / "case_index.csv", index=False)
 
     print(f"Saved case index: {out_csv}")
     print(f"Saved summary:    {out_json}")
     print(f"Copied to run:    {run_dir / 'case_index.csv'}")
-
 
 if __name__ == "__main__":
     main()

@@ -14,12 +14,6 @@ import pydicom
 
 # Pick the most useful DICOM file when a series folder contains multiple candidates
 def _choose_best_dicom(series_dir: Path) -> Path:
-    """
-    Some CBIS-DDSM folders can contain multiple DICOMs (e.g., different derived images).
-    This picks a 'best' candidate by favouring:
-      - largest pixel area (H*W)
-      - higher standard deviation (non-binary / non-empty looking images)
-    """
     dcm_files = sorted(series_dir.rglob("*.dcm"))
     if not dcm_files:
         raise FileNotFoundError(f"No DICOM files found in: {series_dir}")
@@ -91,27 +85,20 @@ def _apply_rescale_window_and_scale(ds, img: np.ndarray) -> np.ndarray:
 
 # Crop away empty borders so the breast region fills more of the frame
 def _crop_to_foreground(img: np.ndarray, thr: float = 0.02, margin_frac: float = 0.03) -> np.ndarray:
-    """
-    Crops to non-background region to reduce black padding dominance.
-    Assumes img is already in [0, 1].
-
-    - thr: background threshold
-    - margin_frac: extra border margin around detected foreground
-    """
     if img.ndim != 2:
         raise ValueError("Expected a 2D (H, W) image array")
 
     mask = img > thr
     if not mask.any():
         return img
-
+    # Find the bounding box of the foreground region and add a margin
     ys, xs = np.where(mask)
     y0, y1 = int(ys.min()), int(ys.max())
     x0, x1 = int(xs.min()), int(xs.max())
-
+    # Add a margin based on the image size, but keep within bounds
     h, w = img.shape
     margin = int(max(h, w) * margin_frac)
-
+    # Add margin but ensure it stays within the image bounds
     y0 = max(0, y0 - margin)
     y1 = min(h - 1, y1 + margin)
     x0 = max(0, x0 - margin)
@@ -128,7 +115,7 @@ def _crop_to_foreground(img: np.ndarray, thr: float = 0.02, margin_frac: float =
 def load_dicom_as_array(series_dir: Path, crop_foreground: bool = True) -> np.ndarray:
     dcm_path = _choose_best_dicom(series_dir)
     ds = pydicom.dcmread(str(dcm_path))
-
+    # Load the pixel data, apply rescaling and windowing, and normalise to [0, 1]
     img = ds.pixel_array.astype(np.float32)
     img = _apply_rescale_window_and_scale(ds, img)
 
@@ -137,8 +124,7 @@ def load_dicom_as_array(series_dir: Path, crop_foreground: bool = True) -> np.nd
 
     return img
 
-
-# Pad a tensor to a square shape before resizing
+# Pad tensor to a square shape before resizing
 class PadToSquare:
     def __call__(self, x: torch.Tensor) -> torch.Tensor:
         # x is (C, H, W)
@@ -191,19 +177,21 @@ class CbisDicomDataset(Dataset):
 
         self.to_tensor = transforms.ToTensor()
 
-        # Default stays ImageNet norm for 3ch because you're using ImageNet-pretrained ResNet18
+        # ImageNet normalisation
         if self.num_channels == 3:
             self.norm = transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225],
             )
         else:
-            # sensible default for single-channel if you ever switch
+            # Default for single channel
             self.norm = transforms.Normalize(mean=[0.5], std=[0.25])
 
+    # Dataset length is the number of rows in the manifest
     def __len__(self) -> int:
         return len(self.df)
-
+    
+    # Core function to load and process one sample from the manifest
     def __getitem__(self, idx: int) -> dict:
         row = self.df.iloc[idx]
 
@@ -213,7 +201,7 @@ class CbisDicomDataset(Dataset):
 
         img = load_dicom_as_array(series_dir, crop_foreground=self.crop_foreground)
 
-        x = self.to_tensor(img)          # (1, H, W), float32 already in [0,1]
+        x = self.to_tensor(img)
         x = self.pad_to_square(x)
         x = self.resize(x)
 
