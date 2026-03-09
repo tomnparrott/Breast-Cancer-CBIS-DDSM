@@ -1,16 +1,13 @@
 from __future__ import annotations
-
 from pathlib import Path
 import json
 import numpy as np
 import pandas as pd
 import pytest
 
-
 # Resolve paths relative to the project root
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
-
 
 # Load the shared config used by the training and eval pipeline
 def _load_cfg() -> dict:
@@ -21,19 +18,16 @@ def _load_cfg() -> dict:
         pytest.skip(f"Missing config.yaml at {cfg_path}")
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
-
 # Find the processed data directory declared in the config
 def _processed_dir(cfg: dict) -> Path:
     return _repo_root() / Path(cfg["data"]["processed_dir"])
 
-
-# Skip gracefully when a local artifact is not available
+# Skip when an artifact is not available
 def _require_file(p: Path, why: str):
     if not p.exists():
         pytest.skip(f"{why} not found: {p}")
 
-
-# Check the processed manifest exposes the fields downstream code expects
+# Check the processed manifest
 @pytest.mark.data
 def test_manifest_has_required_columns():
     cfg = _load_cfg()
@@ -47,7 +41,6 @@ def test_manifest_has_required_columns():
     missing = required - set(df.columns)
     assert not missing, f"manifest.csv missing columns: {missing}"
     assert len(df) > 0, "manifest.csv is empty"
-
 
 # Verify patient IDs stay isolated across train, val, and test splits
 @pytest.mark.data
@@ -71,14 +64,10 @@ def test_splits_exist_and_have_no_patient_leakage():
     assert splits["train"].isdisjoint(splits["test"]), "patient_id leakage: train vs test"
     assert splits["val"].isdisjoint(splits["test"]), "patient_id leakage: val vs test"
 
-
-# Smoke test one dataset item to confirm key outputs and tensor shapes
+# Test one dataset item to confirm outputs and tensor shapes
 @pytest.mark.data
 def test_dataset_item_shapes_smoke():
-    """
-    Loads a single row and checks the dataset returns expected keys and tensor shapes.
-    Skips if the referenced DICOM folder doesn't exist locally.
-    """
+    # A test to confirm the dataset can load one item and produce tensors of the expected shape
     import torch
     from SRC.dataset import CbisDicomDataset
 
@@ -93,7 +82,7 @@ def test_dataset_item_shapes_smoke():
 
     series_dir = Path(str(row0["image_dir"]))
     if not series_dir.exists():
-        pytest.skip(f"Local DICOM folder missing for smoke test: {series_dir}")
+        pytest.skip(f"Local DICOM folder missing for test: {series_dir}")
 
     ds = CbisDicomDataset(
         df=df.iloc[:1].copy(),
@@ -107,20 +96,17 @@ def test_dataset_item_shapes_smoke():
 
     x = sample["image"]
     y = sample["label"]
-
+    # Check the image tensor has the expected shape and value range, and the label is a scalar tensor
     assert isinstance(x, torch.Tensor)
     assert isinstance(y, torch.Tensor)
     assert x.shape == (3, int(cfg["data"]["img_size"]), int(cfg["data"]["img_size"]))
     assert y.shape == (1,)
     assert torch.isfinite(x).all(), "image tensor contains NaN/Inf"
 
-
-# Check the latest metrics JSON still matches the schema used by evaluation tooling
+# Check the metrics JSON still matches the schema used by evaluation
 @pytest.mark.data
 def test_eval_outputs_schema_smoke():
-    """
-    Checks the most recent test_metrics.json has the keys your dashboard expects.
-    """
+
     cfg = _load_cfg()
     proc = _processed_dir(cfg)
 
@@ -132,7 +118,7 @@ def test_eval_outputs_schema_smoke():
 
     # Find the newest test_metrics.json under eval_outputs
     metrics_files = sorted(
-        run_dir.glob("eval_outputs/**/metrics/test_metrics.json"),
+        run_dir.glob("eval_outputs/metrics/test_metrics.json"),
         key=lambda p: p.stat().st_mtime,
         reverse=True,
     )
@@ -142,45 +128,37 @@ def test_eval_outputs_schema_smoke():
 
     metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
 
-    # Core metrics your pipeline uses everywhere
+    # Core metrics
     for k in ["threshold", "auc", "precision", "recall_sensitivity", "specificity", "tp", "fp", "tn", "fn"]:
         assert k in metrics, f"Missing key in test_metrics.json: {k}"
 
-    # Operating points used by the UI
     assert "operating_points" in metrics and isinstance(metrics["operating_points"], dict)
 
 
-# Run one inference pass and confirm the image and Grad-CAM outputs look structurally valid
+# Run inference and confirm the image and Grad-CAM outputs look valid
 @pytest.mark.slow
 @pytest.mark.data
 def test_inference_and_gradcam_shapes_smoke():
-    """
-    Runs a single inference on one manifest row and checks:
-      - probability in [0,1]
-      - gradcam shape matches displayed image
-      - gradcam is in [0,1]
-    Skips if checkpoint or DICOM folder not present locally.
-    """
     from SRC.inference import load_config, processed_dir_from_cfg, resolve_latest_run_dir, resolve_checkpoint_path, run_inference
 
     cfg = load_config()
     proc = processed_dir_from_cfg(cfg)
     run_dir = resolve_latest_run_dir(proc)
 
-    # Need a checkpoint
+    # Need checkpoint
     try:
         _ = resolve_checkpoint_path(run_dir, "best")
     except FileNotFoundError:
-        pytest.skip(f"No checkpoint found in {run_dir} (need model_best.pt)")
+        pytest.skip(f"No checkpoint found in {run_dir}")
 
-    # Need at least one DICOM folder from manifest
+    # Need one DICOM folder from manifest
     manifest_path = proc / "manifest.csv"
     _require_file(manifest_path, "manifest")
     df = pd.read_csv(manifest_path)
 
     series_dir = Path(str(df.iloc[0]["image_dir"]))
     if not series_dir.exists():
-        pytest.skip(f"Local DICOM folder missing for inference smoke test: {series_dir}")
+        pytest.skip(f"Local DICOM folder missing for inference test: {series_dir}")
 
     out = run_inference(
         series_dir=series_dir,
@@ -188,7 +166,7 @@ def test_inference_and_gradcam_shapes_smoke():
         threshold=0.5,
         tta=False,
         explain=True,
-        prefer_cuda=False,  # keep it predictable for testing
+        prefer_cuda=False,
     )
 
     prob = float(out["prob_malignant"])
