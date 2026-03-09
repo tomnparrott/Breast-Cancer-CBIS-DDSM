@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Dict, Any, Tuple
@@ -8,25 +7,16 @@ import json
 import time
 import tempfile
 import zipfile
-
 import numpy as np
 import torch
 import torch.nn as nn
 from torchvision import transforms
-
 from SRC.model import make_resnet18_binary
 from SRC.dataset import load_dicom_as_array, PadToSquare
 
-
-# Run one-off inference from a saved checkpoint and optionally generate Grad-CAM output
-# -----------------------------
-# Paths / Run discovery
-# -----------------------------
-# Resolve the repository root from the `SRC` package
+# Resolve the repository root
 def project_root() -> Path:
-    # SRC/ -> project root is one level up
     return Path(__file__).resolve().parents[1]
-
 
 # Load the shared config so inference uses the same settings as training
 def load_config() -> dict:
@@ -36,7 +26,6 @@ def load_config() -> dict:
     import yaml
     return yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
 
-
 # Choose the best available inference device
 def get_device(prefer_cuda: bool = True) -> str:
     if prefer_cuda and torch.cuda.is_available():
@@ -45,18 +34,12 @@ def get_device(prefer_cuda: bool = True) -> str:
         return "mps"
     return "cpu"
 
-
 # Resolve the processed data directory from config
 def processed_dir_from_cfg(cfg: dict) -> Path:
     return project_root() / Path(cfg["data"]["processed_dir"])
 
-
+# Resolve the latest run directory from the processed data folder, which is where checkpoints are loaded from by default
 def resolve_latest_run_dir(processed_dir: Path) -> Path:
-    """
-    Mirrors eval.py behaviour:
-      processed_dir/latest_run.txt -> run_id -> processed_dir/runs/run_id
-    Falls back to processed_dir if pointer missing.
-    """
     latest_ptr = processed_dir / "latest_run.txt"
     if latest_ptr.exists():
         run_id = latest_ptr.read_text(encoding="utf-8").strip()
@@ -65,7 +48,7 @@ def resolve_latest_run_dir(processed_dir: Path) -> Path:
             return candidate
     return processed_dir
 
-
+# List all run directories available in the processed data folder
 def list_run_dirs(processed_dir: Path) -> list[Path]:
     runs_root = processed_dir / "runs"
     if not runs_root.exists():
@@ -74,8 +57,7 @@ def list_run_dirs(processed_dir: Path) -> list[Path]:
     runs.sort(key=lambda p: p.name, reverse=True)
     return runs
 
-
-# Map friendly checkpoint names like `best` or `final` to actual files
+# Map checkpoint names to actual files
 def resolve_checkpoint_path(run_dir: Path, ckpt: str) -> Path:
     ckpt = ckpt.strip().lower()
     if ckpt in {"best", "model_best", "model_best.pt"}:
@@ -89,27 +71,20 @@ def resolve_checkpoint_path(run_dir: Path, ckpt: str) -> Path:
         raise FileNotFoundError(f"Checkpoint not found: {p}")
     return p
 
-
-# -----------------------------
-# Preprocessing
-# -----------------------------
+# Preprocessing #
 # Bundle the model input tensor together with the display image
 @dataclass
 class PreprocessOutput:
-    x: torch.Tensor          # (1, C, H, W) model-ready tensor
-    img_display: np.ndarray  # (H, W) float in [0,1] (post crop/pad/resize)
+    x: torch.Tensor
+    img_display: np.ndarray
 
-
+# Load a DICOM series folder and apply the same preprocessing used during training, returning both the model input tensor and the display image for Grad-CAM
 def preprocess_series_dir(
     series_dir: Path,
     img_size: int,
     num_channels: int = 3,
     crop_foreground: bool = True,
 ) -> PreprocessOutput:
-    """
-    Loads a DICOM series folder and applies:
-      load_dicom_as_array -> ToTensor -> PadToSquare -> Resize -> repeat channels -> Normalize
-    """
     if not series_dir.exists():
         raise FileNotFoundError(f"Series dir does not exist: {series_dir}")
 
@@ -138,34 +113,19 @@ def preprocess_series_dir(
     x = x.unsqueeze(0)  # (1,C,H,W)
     return PreprocessOutput(x=x, img_display=img_disp)
 
-
-# -----------------------------
-# Model loading
-# -----------------------------
 # Rebuild the model architecture and load checkpoint weights onto it
 def load_model_from_checkpoint(ckpt_path: Path, device: str) -> nn.Module:
-    """
-    Loads ResNet18 binary model and applies checkpoint weights.
-    Uses pretrained=False because weights are loaded from your checkpoint.
-    """
     model = make_resnet18_binary(pretrained=False).to(device)
     state = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(state)
     model.eval()
     return model
 
-
-# -----------------------------
-# Prediction (with optional TTA)
-# -----------------------------
 # Run the model and return a malignant probability
 @torch.no_grad()
 def predict_proba(model: nn.Module, x: torch.Tensor, device: str, tta: bool = False) -> float:
-    """
-    Returns P(y=1). Optional simple TTA: base + horizontal flip average.
-    """
     x = x.to(device=device, dtype=torch.float32)
-
+    # Run the model forward and apply sigmoid to get a probability
     logits = model(x).view(-1)
     p = torch.sigmoid(logits)[0]
 
@@ -177,44 +137,32 @@ def predict_proba(model: nn.Module, x: torch.Tensor, device: str, tta: bool = Fa
 
     return float(p.item())
 
-
-# Convert a probability into the binary class label used by the app
+# Convert a probability into the binary class label
 def decision_from_threshold(prob: float, threshold: float) -> int:
     return int(prob >= threshold)
 
-
-# -----------------------------
-# Grad-CAM (target: layer4[-1].conv2)
-# -----------------------------
+# Grad-CAM 
 def _get_default_cam_layer(model: nn.Module) -> nn.Module:
-    """
-    For torchvision ResNet18, layer4 is a Sequential of BasicBlocks.
-    The most commonly used Grad-CAM target is the last conv in the last block.
-    """
     try:
         return model.layer4[-1].conv2
     except Exception as e:
         raise RuntimeError("Could not resolve Grad-CAM layer as model.layer4[-1].conv2") from e
 
-
+# Compute Grad-CAM heatmap for a given input and model, returning a (H,W) array in [0,1] aligned to the input image. Uses the last conv layer of ResNet18
 def gradcam_resnet18(
     model: nn.Module,
     x: torch.Tensor,
     device: str,
     target_layer: Optional[nn.Module] = None,
 ) -> np.ndarray:
-    """
-    Grad-CAM on a target conv layer (default: model.layer4[-1].conv2).
-    Returns heatmap in [0,1] shaped (H,W) aligned to input.
-    """
     model.eval()
     x = x.to(device=device, dtype=torch.float32)
-
+    # If no target layer specified, default to the last conv layer of ResNet18
     layer = target_layer if target_layer is not None else _get_default_cam_layer(model)
 
     activations: Optional[torch.Tensor] = None
     gradients: Optional[torch.Tensor] = None
-
+    # Define hooks to capture the activations and gradients from the target layer during the forward and backward passes, which are needed to compute the Grad-CAM heatmap. The forward hook saves the output of the target layer, and the backward hook saves the gradients flowing back from the output with respect to the target layer's output
     def fwd_hook(_m, _inp, out):
         nonlocal activations
         activations = out
@@ -235,16 +183,14 @@ def gradcam_resnet18(
     h2.remove()
 
     if activations is None or gradients is None:
-        raise RuntimeError("Grad-CAM hooks failed (no activations/gradients).")
+        raise RuntimeError("Grad-CAM hooks failed")
 
-    # activations/gradients: (1,C,h,w)
-    weights = gradients.mean(dim=(2, 3), keepdim=True)       # (1,C,1,1)
-    cam = (weights * activations).sum(dim=1).squeeze(0)      # (h,w)
+    # activations/gradients
+    weights = gradients.mean(dim=(2, 3), keepdim=True)
+    cam = (weights * activations).sum(dim=1).squeeze(0)
     cam = torch.relu(cam)
-
     cam = cam - cam.min()
     cam = cam / (cam.max() + 1e-8)
-
     cam = torch.nn.functional.interpolate(
         cam.unsqueeze(0).unsqueeze(0),
         size=(x.shape[2], x.shape[3]),
@@ -254,11 +200,7 @@ def gradcam_resnet18(
 
     return cam
 
-
-# -----------------------------
-# Unseen data helpers (zip -> temp dir)
-# -----------------------------
-# Keep the temporary extraction directory alive while inference is using it
+# Keep the temporary extraction directory while inference is using it
 @dataclass
 class ExtractedZip:
     series_dir: Path
@@ -267,13 +209,8 @@ class ExtractedZip:
     def cleanup(self) -> None:
         self._tmp.cleanup()
 
-
 # Extract an uploaded ZIP of DICOM files into a temporary folder
 def extract_zip_to_temp(zip_bytes: bytes) -> ExtractedZip:
-    """
-    Extract uploaded ZIP of DICOMs to a temporary directory.
-    Return an object you must keep alive while using the extracted path.
-    """
     tmp = tempfile.TemporaryDirectory()
     root = Path(tmp.name)
     zpath = root / "upload.zip"
@@ -282,11 +219,7 @@ def extract_zip_to_temp(zip_bytes: bytes) -> ExtractedZip:
         z.extractall(root / "unzipped")
     return ExtractedZip(series_dir=root / "unzipped", _tmp=tmp)
 
-
-# -----------------------------
-# High-level API: run inference
-# -----------------------------
-# Tie together config loading, preprocessing, prediction, and optional Grad-CAM
+# Tie together config loading, preprocessing, prediction, and Grad-CAM
 def run_inference(
     series_dir: Path,
     ckpt: str = "best",
@@ -296,16 +229,7 @@ def run_inference(
     prefer_cuda: bool = True,
     run_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """
-    One-call inference:
-      - loads config
-      - resolves latest run dir (unless run_dir provided)
-      - loads checkpoint
-      - preprocesses series_dir
-      - predicts probability (+ optional TTA)
-      - optional Grad-CAM (layer4[-1].conv2)
-      - returns structured result for Streamlit/logging
-    """
+    # Load config and resolve paths, then load the model checkpoint
     cfg = load_config()
     proc_dir = processed_dir_from_cfg(cfg)
 
@@ -317,12 +241,13 @@ def run_inference(
 
     img_size = int(cfg["data"]["img_size"])
     prep = preprocess_series_dir(series_dir, img_size=img_size, num_channels=3, crop_foreground=True)
-
+    
     t0 = time.time()
     prob = predict_proba(model, prep.x, device=device, tta=tta)
     pred = decision_from_threshold(prob, threshold)
     dt = time.time() - t0
 
+    # Bundle results together into a dictionary
     result: Dict[str, Any] = {
         "series_dir": str(series_dir),
         "run_dir": str(resolved_run_dir),
@@ -343,10 +268,6 @@ def run_inference(
 
     return result
 
-
-# -----------------------------
-# CLI (quick verification)
-# -----------------------------
 # Provide a command-line entry point for quick local inference checks
 def _cli() -> None:
     ap = argparse.ArgumentParser(description="Run inference on a DICOM series folder.")
@@ -359,9 +280,10 @@ def _cli() -> None:
     ap.add_argument("--run_dir", type=str, default="", help="Optional explicit run dir (overrides latest_run.txt).")
     ap.add_argument("--out_json", type=str, default="", help="Optional path to save JSON output.")
     args = ap.parse_args()
-
+    
     run_dir = Path(args.run_dir) if args.run_dir.strip() else None
 
+    # Run inference and print the results as JSON
     res = run_inference(
         series_dir=Path(args.series_dir),
         ckpt=args.ckpt,
@@ -372,14 +294,13 @@ def _cli() -> None:
         run_dir=run_dir,
     )
 
-    # make JSON serialisable (exclude arrays)
+    # make JSON serialisable 
     serialisable = {k: v for k, v in res.items() if k not in {"img_display", "gradcam"}}
     print(json.dumps(serialisable, indent=2))
 
     if args.out_json:
         Path(args.out_json).write_text(json.dumps(serialisable, indent=2), encoding="utf-8")
         print(f"Saved: {args.out_json}")
-
 
 if __name__ == "__main__":
     _cli()

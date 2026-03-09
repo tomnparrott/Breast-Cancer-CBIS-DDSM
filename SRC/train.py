@@ -2,34 +2,28 @@ from pathlib import Path
 import yaml
 import pandas as pd
 import numpy as np
-
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, WeightedRandomSampler
 from tqdm import tqdm
 from sklearn.metrics import roc_auc_score
-
 import json
 import datetime
 import platform
 import subprocess
 from contextlib import nullcontext
-
-from torch.amp import GradScaler, autocast  # fixes torch.cuda.amp.GradScaler deprecation
-
+from torch.amp import GradScaler, autocast
 from SRC.seed import set_seed
 from SRC.model import make_resnet18_binary
 from SRC.dataset import CbisDicomDataset
 from SRC.split_data import split_by_patient
-
 
 # Load the main training config from disk
 def load_config() -> dict:
     cfg_path = Path("Configs/config.yaml")
     return yaml.safe_load(cfg_path.read_text())
 
-
-# Choose the best available device for training and validation
+# Choose the best available device for training and validation - depending on which laptop I'm using. My main laptop has an NVIDIA GPU but my Macbook Air isn't as powerful, so if i have to run it on there, it will default to CPU
 def get_device() -> str:
     if torch.cuda.is_available():
         return "cuda"
@@ -37,26 +31,23 @@ def get_device() -> str:
         return "mps"
     return "cpu"
 
-
-# Capture the current git commit for run metadata
+# Capture the current git commit for run metadata 
 def get_git_hash() -> str:
     try:
         return subprocess.check_output(["git", "rev-parse", "--short", "HEAD"]).decode().strip()
     except Exception:
         return "unknown"
 
-
-# Create a timestamped run directory and update the latest-run pointer
+# Create a timestamped run directory and update the latest run pointer
 def make_run_dir(processed_dir: Path, seed: int) -> Path:
     runs_root = processed_dir / "runs"
     runs_root.mkdir(parents=True, exist_ok=True)
     run_id = datetime.datetime.now(datetime.UTC).strftime("%Y%m%d_%H%M%S") + f"_seed{seed}"
     run_dir = runs_root / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
-
+    # Update the latest_run.txt pointer to this run directory for easy access by evaluation and the dashboard
     (processed_dir / "latest_run.txt").write_text(run_id, encoding="utf-8")
     return run_dir
-
 
 # Save the environment and config snapshot needed to reproduce the run
 def write_run_info(run_dir: Path, cfg: dict) -> None:
@@ -76,35 +67,28 @@ def write_run_info(run_dir: Path, cfg: dict) -> None:
     }
     (run_dir / "run_info.json").write_text(json.dumps(info, indent=2), encoding="utf-8")
 
-
-# Use the configured positive-class weight or infer one from the training labels
+# Use the configured positive-class weight or infer one from the training labels to help with class imbalance during training
 def _resolve_pos_weight(cfg: dict, labels_np: np.ndarray) -> float:
-    """
-    Use cfg['train']['pos_weight'] if set to a sensible float.
-    If it's 'auto' or <= 0, compute neg/pos from the TRAIN split.
-    """
     pw = cfg.get("train", {}).get("pos_weight", 1.0)
 
     if isinstance(pw, str) and pw.strip().lower() == "auto":
         pw = 0.0
 
     pw = float(pw)
-
+    
     if pw > 0:
         return pw
-
+    
     pos = float((labels_np == 1).sum())
     neg = float((labels_np == 0).sum())
     if pos <= 0:
         return 1.0
     return neg / pos
 
-
 # Build the weighted BCE loss used for binary classification
 def make_bce_loss(pos_weight_value: float, device: str) -> nn.Module:
     pos_weight = torch.tensor([pos_weight_value], dtype=torch.float32, device=device)
     return nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
 
 # Run one validation pass and return the core metrics tracked during training
 @torch.no_grad()
@@ -120,7 +104,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, criterion: nn.Mo
 
     use_amp = (device == "cuda")
     ctx = autocast(device_type="cuda", dtype=torch.float16) if use_amp else nullcontext()
-
+    # for each batch in the validation set, get the model predictions and calculate the loss, accuracy, and store the probabilities for AUC calculation at the end of the epoch
     for batch in loader:
         x = batch["image"].to(device=device, dtype=torch.float32)
         y = batch["label"].to(device=device, dtype=torch.float32).view(-1)
@@ -153,7 +137,6 @@ def evaluate(model: nn.Module, loader: DataLoader, device: str, criterion: nn.Mo
         "auc": float(auc),
     }
 
-
 # Train the model, validate each epoch, and save the run artifacts
 def main() -> None:
     cfg = load_config()
@@ -173,7 +156,7 @@ def main() -> None:
         )
 
     manifest = pd.read_csv(manifest_path)
-
+    # Check required columns exist before splitting
     splits = split_by_patient(
         manifest=manifest,
         val_frac=float(cfg["split"]["val_frac"]),
@@ -184,6 +167,7 @@ def main() -> None:
     splits.to_csv(run_dir / "splits.csv", index=False)
     splits.to_csv(processed_dir / "splits.csv", index=False)
 
+    # Get the training parameters from config
     img_size = int(cfg["data"]["img_size"])
     batch_size = int(cfg["train"]["batch_size"])
     num_workers = int(cfg["train"]["num_workers"])
@@ -195,9 +179,12 @@ def main() -> None:
     labels_np = train_df["label"].astype(int).to_numpy()
     pos_weight_value = _resolve_pos_weight(cfg, labels_np)
 
+    # Print the class distribution and resolved positive weight for transparency before training starts
     print(f"Train class counts: neg={(labels_np==0).sum()} pos={(labels_np==1).sum()}")
     print(f"Using pos_weight={pos_weight_value:.4f}")
 
+
+    # Create the datasets and dataloaders for training and validation, using a weighted random sampler if configured to help with class imbalance. The weighted random sampler will oversample the minority class (the malignant class) during training to help the model learn from those examples, but the validation set will not use sampling to ensure an unbiased evaluation of performance
     augment = bool(cfg.get("train", {}).get("augment", False))
     train_ds = CbisDicomDataset(train_df, img_size=img_size, augment=augment)
     val_ds = CbisDicomDataset(val_df, img_size=img_size, augment=False)
@@ -278,6 +265,7 @@ def main() -> None:
 
     best_val_auc = 0.0
 
+    # Main training loop iterating over epochs, performing training and validation, and saving the best model checkpoint based on validation AUC
     for epoch in range(1, epochs + 1):
         model.train()
         running_loss = 0.0
@@ -299,21 +287,21 @@ def main() -> None:
             # stability
             scaler.unscale_(optimiser)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            # IMPORTANT ORDER (removes scheduler warning):
-            # optimizer step -> scheduler step -> scaler update
-            scaler.step(optimiser)       # performs optimiser.step() when enabled
-            scheduler.step()            # OneCycleLR expects stepping after optimiser.step()
-            scaler.update()             # update scaler after stepping
-
+    
+            scaler.step(optimiser)
+            scheduler.step()
+            scaler.update()
+            # Update the running loss and seen count for the progress bar, and display the current average training loss and learning rate
             running_loss += float(loss.item()) * x.size(0)
             seen += x.size(0)
 
             pbar.set_postfix(train_loss=(running_loss / max(seen, 1)), lr=optimiser.param_groups[0]["lr"])
-
+            
+        # After each epoch, calculate the average training loss and run validation to get the metrics for this epoch
         train_loss = running_loss / max(seen, 1)
         val_metrics = evaluate(model, val_loader, device=device, criterion=criterion)
 
+        # Print epoch summary and save the best checkpoint based on validation AUC
         print(
             f"[Epoch {epoch}] "
             f"train_loss={train_loss:.4f} "
@@ -328,11 +316,11 @@ def main() -> None:
             torch.save(model.state_dict(), ckpt_path)
             print(f"Saved best checkpoint (AUC={best_val_auc:.4f}): {ckpt_path}")
 
+    # Save the final model after training completes, which may be different from the best checkpoint
     final_path = run_dir / "model_final.pt"
     torch.save(model.state_dict(), final_path)
     torch.save(model.state_dict(), processed_dir / "model_final.pt")
     print(f"Saved final model: {final_path}")
-
 
 if __name__ == "__main__":
     main()
